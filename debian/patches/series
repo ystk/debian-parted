@@ -1,0 +1,22 @@
+# Debian specific patches
+doc-package.patch
+
+# For upstream merging
+preserve-hidden-parts.patch
+update-ext4-code.patch
+#unblacklist-md.patch
+kfreebsd-gnu.patch
+btrfs.patch
+loop-limits.patch
+freebsd-ufs.patch
+zfs.patch
+zero-length-devices.patch
+
+# Backported
+sun-revert-disk-flag.patch
+sun-raid-type-test-fix.patch
+tiny-disk-constraint.patch
+dasd-sync.patch
+
+# Symbols for this ABI (amd64 as reference)
+update-abi-symbols.patch
