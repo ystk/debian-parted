@@ -1,3 +1,104 @@
+parted (2.3-12) unstable; urgency=low
+
+  * Breaks: python-parted (<< 3.6-5); previous versions were broken by the
+    PED_PARTITION_LAST_FLAG change in 2.3-11.1 (closes: #697588).
+
+ -- Colin Watson <cjwatson@debian.org>  Mon, 07 Jan 2013 12:13:14 +0000
+
+parted (2.3-11.1) unstable; urgency=low
+
+  * Non-maintainer upload.
+  * Cherry-pick upstream patches to fix the handling of GPT partition
+    flags when modifying a GPT. This, most particularly fixes the
+    handling of 'legagy BIOS bootable'. 
+    Thanks to Jérémy Bobbio for providing the patch and analysis.
+    Closes: #673042
+
+ -- Christian Perrier <bubulle@debian.org>  Tue, 01 Jan 2013 14:44:03 +0100
+
+parted (2.3-11) unstable; urgency=medium
+
+  * Non-maintainer upload to fix partitioned md devices (bug #684713)
+  * backport md-partitions.patch: libparted/arch/linux.c
+    (_device_get_partition_range): Use /sys/block/DEV/ext_range instead
+    of range sysfs file.
+
+ -- Miquel van Smoorenburg <miquels@debian.org>  Thu, 13 Sep 2012 15:35:00 +0200
+
+parted (2.3-10) unstable; urgency=low
+
+  * Acknowledge NMUs with thanks (closes: #676593).
+  * Back out non-registered-device.diff, which had already been applied
+    upstream in 2.3.
+  * Rearrange patch ordering slightly.
+  * Update debian/watch for upstream switch to .tar.xz.
+  * Use dpkg-buildflags to enable hardening options.
+  * Build with V=1 so that tools such as blhc can scan more effectively for
+    missing build flags.
+  * Remove Sven Luther from Uploaders with thanks for his past contributions
+    (closes: #677756).
+  * Revert ABI symbols change from 2.3-9.2, since whatever prompted that
+    change seems to have changed back (closes: #678788).
+
+ -- Colin Watson <cjwatson@debian.org>  Wed, 27 Jun 2012 00:01:04 +0100
+
+parted (2.3-9.2) unstable; urgency=low
+
+  * Non-maintainer upload.
+  * Add partition table re-read on hurd-i386 (Closes: #669936).
+  * Backport gnulib fix for set but not used variables (Closes: #676590).
+  * Update ABI symbol list (Closes: #676591).
+
+ -- Samuel Thibault <sthibault@debian.org>  Fri, 08 Jun 2012 02:04:11 +0200
+
+parted (2.3-9.1) unstable; urgency=low
+
+  * Non-maintainer upload.
+  * kfreebsd_lvm.patch: Support LVM on GNU/kFreeBSD.  (Closes: #644825)
+  * hurd-partition-path.patch: Fix wrong path for GNU/Hurd partitions,
+    patch from Jeremie Koenig.  (Closes: #586696)
+  * non-registered-device.diff: Fix NULL dereference condition, patch
+    from Jeremie Koenig.  (Closes: #586682)
+
+ -- Robert Millan <rmh@debian.org>  Mon, 09 Apr 2012 09:46:19 +0000
+
+parted (2.3-9) unstable; urgency=low
+
+  [ Colin Watson ]
+  * Add build-arch and build-indep targets to debian/rules.
+
+  [ Svante Signell ]
+  * Avoid building debian/rules targets more than once (closes: #649741).
+
+ -- Colin Watson <cjwatson@debian.org>  Sat, 31 Mar 2012 18:51:13 +0100
+
+parted (2.3-8) unstable; urgency=low
+
+  [ Robert Millan ]
+  * Add detection of ZFS volumes (closes: #635384).
+  * Add detection of GEOM encryption devices (closes: #635393).
+
+ -- Colin Watson <cjwatson@debian.org>  Sat, 30 Jul 2011 14:37:34 +0100
+
+parted (2.3-7) unstable; urgency=low
+
+  * Use [linux-any] in debian/control rather than [!hurd-i386 !kfreebsd-i386
+    !kfreebsd-amd64].
+  * Remove libparted.la from libparted0-dev.
+  * Convert to multiarch.
+
+ -- Colin Watson <cjwatson@debian.org>  Sun, 17 Jul 2011 14:25:45 +0100
+
+parted (2.3-6) unstable; urgency=low
+
+  * Backport from upstream:
+    - Accommodate two-component Linux version numbers like 3.0
+      (LP: #796865).
+  * Rewrite package descriptions and add a Homepage field (thanks, Justin B
+    Rye; closes: #615124).
+
+ -- Colin Watson <cjwatson@debian.org>  Wed, 15 Jun 2011 15:21:08 +0100
+
 parted (2.3-5) unstable; urgency=low
 
   * Remove DASD restriction on _disk_sync_part_table, as otherwise DASD
