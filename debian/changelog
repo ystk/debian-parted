@@ -1,3 +1,237 @@
+parted (3.2-5) unstable; urgency=medium
+
+  * Update freebsd-ufs.patch to handle non-512-byte-sector disks
+    (LP: #1355127).
+
+ -- Colin Watson <cjwatson@debian.org>  Mon, 25 Aug 2014 19:20:11 +0100
+
+parted (3.2-4) unstable; urgency=high
+
+  * Probe LVM logical volumes even when their physical volumes are on
+    device-mapper devices (closes: #757750).
+
+ -- Colin Watson <cjwatson@debian.org>  Mon, 11 Aug 2014 14:02:26 +0100
+
+parted (3.2-3) unstable; urgency=high
+
+  * Probe LVM logical volumes again (closes: #757417).
+
+ -- Colin Watson <cjwatson@debian.org>  Sun, 10 Aug 2014 11:02:32 +0100
+
+parted (3.2-2) unstable; urgency=high
+
+  * Fix gptsync.patch not to try to perform pointer arithmetic on void *
+    values.
+  * Remove unused label from udevadm-settle.patch.
+  * Configure with --disable-gcc-warnings, even when building from git.
+    Making the build work with -Werror is too painful at the moment.
+  * Align new partitions created on fresh disks (LP: #1352252).
+
+ -- Colin Watson <cjwatson@debian.org>  Wed, 06 Aug 2014 15:21:03 +0100
+
+parted (3.2-1) unstable; urgency=medium
+
+  * New upstream release.
+  * Drop currently-unused build-dependency on po4a (thanks, Johannes
+    Schauer).
+
+ -- Colin Watson <cjwatson@debian.org>  Wed, 30 Jul 2014 13:16:15 +0100
+
+parted (3.1-4) unstable; urgency=medium
+
+  * Ship static libraries again.  hurd needs them for ext2fs.static.
+
+ -- Colin Watson <cjwatson@debian.org>  Wed, 23 Jul 2014 10:55:09 +0100
+
+parted (3.1-3) unstable; urgency=medium
+
+  * Upload to unstable.
+
+ -- Colin Watson <cjwatson@debian.org>  Mon, 21 Jul 2014 10:23:16 +0100
+
+parted (3.1-2) experimental; urgency=medium
+
+  * Rename XC-Package-Type control fields to Package-Type.
+  * Note the presence of ped_disk_dasd_done and ped_disk_dasd_init symbols
+    on s390 and s390x.
+  * Note the presence of ped_device_new_from_store on hurd-any.
+  * Add ${misc:Depends} to libparted0-dev's Depends field.
+
+ -- Colin Watson <cjwatson@debian.org>  Wed, 16 Jul 2014 22:20:01 +0100
+
+parted (3.1-1) experimental; urgency=medium
+
+  * New upstream release (closes: #646130, LP: #1046391; see #754582 for
+    transition tracking):
+    - Improve support of DASD devices on s390 (closes: #578097).
+    - Remove old and unmaintainable file system creation, deletion, and
+      copying code; please use other FS-specific tools instead (closes:
+      #399046, #481435, #751406).  Most resizing code is also gone, although
+      HFS+ and FAT resizing is still available via libparted-fs-resize.
+    - Fix snap radius to avoid miscalculation of partition size when the
+      start or end is 1<unit> (closes: #706023).
+  * Update binary package names to libparted2 (etc.).  We can safely drop
+    the "debian1" suffix now, as the previous incarnation of libparted2 was
+    about 14 years ago, and the Conflicts against it were made versioned
+    four years ago in 2.2-4.
+  * Split off separate packages for libparted-fs-resize, which has a
+    different SONAME.
+  * Remove largely-unhelpful version from libparted-i18n and libparted-dev
+    package names.
+  * Add .symbols files and stop using the old "make check-abi" mechanism,
+    which was cumbersome and appears to be unmaintained upstream.  This is
+    also more robust against differing build options (closes: #744313).
+  * Convert from the long-deprecated dh_movefiles to dh_install.
+  * Remove lots of parameterisation from the packaging which was intended to
+    make it easier to handle SONAME changes.  Enough things still have to be
+    adjusted manually that it didn't really help, and it made the packaging
+    harder to understand.
+  * Modernise and correct use of dpkg-architecture variables to work better
+    when cross-building.
+  * Drop another vestige of the old parted-bf package.
+  * Stop shipping static libraries.
+  * Use dh_link to fix up .so links in libparted-dev rather than doing it by
+    hand in debian/rules.
+  * Move development libraries into multiarch directories and mark
+    libparted-dev as Multi-Arch: same.
+  * Drop -fgnu89-inline workaround, which is no longer needed (and was
+    actually disabled by accident in 2.3-10).
+  * Drop the hardcoded minimum version passed to dh_makeshlibs, since this
+    is now effectively superseded by the .symbols file.
+  * Update Vcs-* to current canonical URLs.
+  * Convert to dh(1).
+  * Make parted and parted-udeb have exact-version dependencies on
+    libparted2 and libparted2-udeb respectively.
+  * Add a libparted0-dev transitional package.  Most of the packages that
+    build-depend on us have a versioned build-dependency on libparted0-dev
+    right now, so this greatly simplifies the transition.
+  * Stop disabling pc98 support on powerpc; 3.1 tightened up pc98 probing so
+    that it has many fewer false positives.
+  * Remove use of --disable-Werror on several architectures; as of 3.0,
+    parted no longer supports this configure option and just builds without
+    -Werror.
+
+ -- Colin Watson <cjwatson@debian.org>  Mon, 14 Jul 2014 12:44:37 +0100
+
+parted (2.3-20) unstable; urgency=medium
+
+  * Fix crash when opening FAT file systems (LP: #1306704).
+
+ -- Colin Watson <cjwatson@debian.org>  Mon, 14 Apr 2014 11:44:43 +0100
+
+parted (2.3-19) unstable; urgency=medium
+
+  [ Phillip Susi ]
+  * fat-ntfs-large-sectors.patch: Fix fat and ntfs detection on non 512 byte
+    sectors (closes: #743816, LP: #1302762).
+
+ -- Colin Watson <cjwatson@debian.org>  Tue, 08 Apr 2014 12:55:59 +0100
+
+parted (2.3-18) unstable; urgency=medium
+
+  * Fix LVM handling regressions caused by fix-loop-labels.patch
+    (LP: #1300072):
+    - Initialise dev->loop in ped_disk_new_fresh rather than ped_disk_new.
+    - Temporarily set disk->dev->loop to 0 while removing partitions, so
+      that we can remove previously-existing non-loop partitions (thanks,
+      Phillip Susi).
+
+ -- Colin Watson <cjwatson@debian.org>  Wed, 02 Apr 2014 00:01:13 +0100
+
+parted (2.3-17) unstable; urgency=low
+
+  [ Phillip Susi ]
+  * avoid-disturbing-partitions.patch: remove all old partitions (that are
+    not unchanged) first, then add new ones.  This avoids an EBUSY trying to
+    add new partitions that overlap with old ones that have a higher number
+    (closes: #742847, LP: #1220165).
+  * fix-loop-labels.patch: Fix loop labels (filesystem on whole disk
+    device).
+
+  [ Colin Watson ]
+  * Slight tweak to avoid-disturbing-partitions.patch to continue to handle
+    entirely unchanged partitions properly.
+  * Convert to git-dpm.
+  * Backport upstream change to add GPT PReP GUID support.
+
+  [ Dimitri John Ledkov ]
+  * Cherry-pick upstream fix for FTBFS with readline 6.3 (closes: #741842).
+
+ -- Colin Watson <cjwatson@debian.org>  Fri, 28 Mar 2014 17:49:47 +0000
+
+parted (2.3-16) unstable; urgency=low
+
+  * Convert libparted0debian1-dbg to a normal separated-debug-symbols
+    package rather than shipping a rather odd /usr/lib/libparted_g.a file,
+    saving a build pass and making it more generally useful.  This also
+    involves enabling mtrace on all build passes, which should be fine since
+    it only does anything if MALLOC_TRACE is set in the environment.
+
+ -- Colin Watson <cjwatson@debian.org>  Tue, 10 Sep 2013 17:29:34 +0100
+
+parted (2.3-15) unstable; urgency=low
+
+  [ Pino Toscano ]
+  * Disable DMI detection on the Hurd (closes: #719628).
+  * Don't match tarball compression extensions in watch file (closes:
+    #719630).
+
+ -- Colin Watson <cjwatson@debian.org>  Tue, 13 Aug 2013 22:01:46 +0100
+
+parted (2.3-14) unstable; urgency=low
+
+  * Merge fix-head-size-assertion.patch from Ubuntu: change an
+    assert so it correctly recovers instead of aborting the program
+    (closes: #620273).
+  * Merge dm_p_separator.patch from Ubuntu: parted would add a
+    'p' between the base device name and the partition number for
+    all device-mapper devices instead of only if the base name
+    ended in a digit.
+  * Merge remove-dev_t-dep.patch from Ubuntu: parted was making
+    bad assumptions about the meaning of the values of dev_t,
+    causing it to fail to detect in-use partitions on all dmraid
+    disks, and regular disk partitions > #16.
+  * Merge skip-floppy.patch from Ubuntu: add floppies to the list
+    of ignored devices since they can not be partitioned anyhow,
+    and often people have no floppy though their bios thinks they do,
+    and touching it causes hangs.
+  * Merge gptsync.patch from Ubuntu: On Intel Mac systems, write a
+    synced MBR rather than a protective MBR.
+  * Merge loop-partitions.patch from Ubuntu: backport some changes
+    to allow the use of partitions on loop devices.  This also
+    allows more than 16 partitions.
+  * Merge dmraid.patch from Ubuntu: Don't probe dmraid partition
+    devices.  Also set UUID of newly created dmraid partition devices.
+  * Merge dm-part-sync.patch from Ubuntu: refactor device-mapper
+    partition sync code so it does not fail when unmodified partitions
+    are mounted.
+  * Merge udevadm-settle.patch from Ubuntu: Run udevadm settle around
+    partition table rereads, to avoid races.
+  * Merge 16-dos-partitions.patch from Ubuntu: the kernel was not
+    being informed of partitions above #16 on dos partition tables
+    (closes: #667638).
+  * Merge hfs-probe-corrupt.patch from Ubuntu: don't let a corrupt
+    FS evoke failed assertion.
+  * Backport online resize patches: 0001-parted-resizepart-command.patch,
+    0003-libparted-Add-support-for-BLKPG-ioctl-partition-resi.patch,
+    and 0004-parted-make-_partition_warn_busy-actually-a-warning.patch
+  * Merge fewer-gpt-entries.patch: Backport upstream patches to handle
+    GPT labels with fewer than 128 partition entries (LP: #1187560).
+  * debian/patches/avoid-disturbing-partitions.patch: Don't remove and
+    re-add unmodified partitions (LP: #1060484).
+  * debian/patches/linux-specific-gpt-type.patch: Backport upstream
+    changes to use a linux specific partition type code instead of
+    Microsoft's, which causes Windows to offer to format the partition.
+
+ -- Phillip Susi <psusi@ubuntu.com>  Mon, 12 Aug 2013 10:11:10 +0100
+
+parted (2.3-13) unstable; urgency=low
+
+  * Use dh-autoreconf.
+  * Avoid assuming that gets is declared (closes: #699653).
+
+ -- Colin Watson <cjwatson@debian.org>  Thu, 09 May 2013 10:48:00 +0100
+
 parted (2.3-12) unstable; urgency=low
 
   * Breaks: python-parted (<< 3.6-5); previous versions were broken by the

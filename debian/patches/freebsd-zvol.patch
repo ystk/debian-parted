@@ -1,15 +1,24 @@
-Description: Detection of ZFS volumes (ZVOL)
- ZFS volumes (ZVOL) are the ZFS equivalent of Logical Volumes in LVM.
- .
- They implement a block device which can be used for swap or legacy
- filesystems.
-Author: Robert Millan <rmh@debian.org>
+From b62fecc10deaa9b84af44192ce52e84c1280a4a9 Mon Sep 17 00:00:00 2001
+From: Robert Millan <rmh@debian.org>
+Date: Fri, 28 Mar 2014 17:09:50 +0000
+Subject: Detection of ZFS volumes (ZVOL)
+
+ZFS volumes (ZVOL) are the ZFS equivalent of Logical Volumes in LVM.
+
+They implement a block device which can be used for swap or legacy
+filesystems.
+
 Bug-Debian: http://bugs.debian.org/635384
 Forwarded: no
 Last-Update: 2011-07-30
 
-Index: b/libparted/arch/freebsd.c
-===================================================================
+Patch-Name: freebsd-zvol.patch
+---
+ libparted/arch/freebsd.c | 40 ++++++++++++++++++++++++++++++++++++++++
+ 1 file changed, 40 insertions(+)
+
+diff --git a/libparted/arch/freebsd.c b/libparted/arch/freebsd.c
+index 52f5293..a53eadc 100644
 --- a/libparted/arch/freebsd.c
 +++ b/libparted/arch/freebsd.c
 @@ -23,6 +23,7 @@
@@ -20,7 +29,7 @@ Index: b/libparted/arch/freebsd.c
  #include <errno.h>
  #include <fcntl.h>
  #include <stdint.h>
-@@ -1096,12 +1097,51 @@
+@@ -1096,12 +1097,51 @@ _probe_kern_disks ()
  	return 1;
  }
  

@@ -1,33 +1,15 @@
-# Debian specific patches
 doc-package.patch
-
-# For upstream merging
 preserve-hidden-parts.patch
-update-ext4-code.patch
-#unblacklist-md.patch
 kfreebsd-gnu.patch
-btrfs.patch
-loop-limits.patch
 freebsd-ufs.patch
 zfs.patch
-zero-length-devices.patch
 freebsd-zvol.patch
 freebsd-geli.patch
 kfreebsd_lvm.patch
 hurd-partition-path.patch
 hurd-reread.patch
-gnulib.patch
-
-# Backported
-sun-revert-disk-flag.patch
-sun-raid-type-test-fix.patch
-tiny-disk-constraint.patch
-dasd-sync.patch
-gpt-add-partition-attribute-bits.patch
-gpt-add-legacy_boot-partition-flag.patch
-libparted-gpt-copy-flags.patch
-linux-two-component.patch
-md-partitions.patch
-
-# Symbols for this ABI (amd64 as reference)
-update-abi-symbols.patch
+gptsync.patch
+udevadm-settle.patch
+fat-resize-large-sectors.patch
+align-new-partitions-on-fresh-disks.patch
+probe-lvs-again.patch

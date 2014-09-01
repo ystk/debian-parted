@@ -1,0 +1,705 @@
+From 8f3a1cb8c5b4fd3178f1770b70f848643a8ad5a9 Mon Sep 17 00:00:00 2001
+From: Matthew Garrett <mjg59@srcf.ucam.org>
+Date: Fri, 28 Mar 2014 17:10:01 +0000
+Subject: GPT syncing for Intel Macs
+
+On Intel Mac systems, write a synced MBR rather than a protective MBR.
+
+From: Colin Watson <cjwatson@ubuntu.com>
+Forwarded: no
+Last-Update: 2014-08-05
+
+Patch-Name: gptsync.patch
+---
+ libparted/labels/gpt.c | 430 +++++++++++++++++++++++++++++++++++++++++++++++--
+ tests/Makefile.am      |   1 +
+ tests/t0290-gptsync.sh | 175 ++++++++++++++++++++
+ 3 files changed, 596 insertions(+), 10 deletions(-)
+ create mode 100644 tests/t0290-gptsync.sh
+
+diff --git a/libparted/labels/gpt.c b/libparted/labels/gpt.c
+index fbb57c3..b199504 100644
+--- a/libparted/labels/gpt.c
++++ b/libparted/labels/gpt.c
+@@ -10,6 +10,11 @@
+     Per Intel EFI Specification v1.02
+     http://developer.intel.com/technology/efi/efi.htm
+ 
++    DMI handling from dmidecode:
++      (C) 2000-2002 Alan Cox <alan@redhat.com>
++      (C) 2002-2005 Jean Delvare <khali@linux-fr.org>
++      Reduced for Intel Mac detection by Colin Watson <cjwatson@ubuntu.com>
++
+     This program is free software; you can redistribute it and/or modify
+     it under the terms of the GNU General Public License as published by
+     the Free Software Foundation; either version 3 of the License, or
+@@ -34,6 +39,8 @@
+ #include <stdio.h>
+ #include <sys/types.h>
+ #include <sys/ioctl.h>
++#include <sys/mman.h>
++#include <sys/stat.h>
+ #include <fcntl.h>
+ #include <unistd.h>
+ #include <uuid/uuid.h>
+@@ -310,6 +317,258 @@ typedef struct _GPTPartitionData
+ 
+ static PedDiskType gpt_disk_type;
+ 
++
++#if (defined(__i386__) || defined(__x86_64__)) && !defined(__GNU__)
++# define USE_DMI
++#endif
++
++#define APPLE_DMI "Apple Computer, Inc."
++#define APPLE_DMI_2 "Apple Inc."
++static int is_apple = 0;
++
++#ifdef USE_DMI
++
++#define WORD(x) (*(const uint16_t *)(x))
++#define DWORD(x) (*(const uint32_t *)(x))
++
++struct dmi_header
++{
++  uint8_t type;
++  uint8_t length;
++  uint16_t handle;
++};
++
++
++static int
++checksum (const uint8_t *buf, size_t len)
++{
++  uint8_t sum = 0;
++  size_t a;
++
++  for (a = 0; a < len; a++)
++    sum += buf[a];
++  return (sum == 0);
++}
++
++/* Copy a physical memory chunk into a memory buffer.
++ * This function allocates memory.
++ */
++static void *
++mem_chunk (size_t base, size_t len)
++{
++  void *p;
++  int fd;
++  size_t mmoffset;
++  char *mmp;
++
++  fd = open ("/dev/mem", O_RDONLY);
++  if (fd == -1)
++    return NULL;
++
++  p = malloc (len);
++  if (p == NULL)
++  {
++    close (fd);
++    return NULL;
++  }
++
++#ifdef _SC_PAGESIZE
++  mmoffset = base % sysconf (_SC_PAGESIZE);
++#else
++  mmoffset = base % getpagesize ();
++#endif
++  /* Please note that we don't use mmap() for performance reasons here, but
++   * to workaround problems many people encountered when trying to read from
++   * /dev/mem using regular read() calls.
++   */
++  mmp = mmap (0, mmoffset + len, PROT_READ, MAP_SHARED, fd, base - mmoffset);
++  if (mmp == MAP_FAILED) {
++    free (p);
++    close (fd);
++    return NULL;
++  }
++
++  memcpy (p, mmp + mmoffset, len);
++
++  munmap (mmp, mmoffset + len);
++
++  close (fd);
++
++  return p;
++}
++
++static const char *
++dmi_string (struct dmi_header *dm, uint8_t s)
++{
++  char *bp = (char *) dm;
++  size_t i, len;
++
++  if (s == 0)
++    return "Not Specified";
++
++  bp += dm->length;
++  while (s > 1 && *bp)
++  {
++    bp += strlen (bp);
++    bp++;
++    s--;
++  }
++
++  if (!*bp)
++    return "<BAD INDEX>";
++
++  /* ASCII filtering */
++  len = strlen (bp);
++  for (i = 0; i < len; i++)
++    if (bp[i] < 32 || bp[i] == 127)
++      bp[i] = '.';
++
++  return bp;
++}
++
++static char *
++dmi_table (uint32_t base, uint16_t len, uint16_t num)
++{
++  uint8_t *buf;
++  uint8_t *data;
++  int i = 0;
++  char *ret = NULL;
++
++  buf = mem_chunk (base, len);
++  if (buf == NULL)
++    return NULL;
++
++  data = buf;
++  while (i < num && data + sizeof (struct dmi_header) <= buf + len) {
++    uint8_t *next;
++    struct dmi_header *h = (struct dmi_header *) data;
++
++    /* Stop decoding at end of table marker */
++    if (h->type == 127)
++      break;
++
++    /* Look for the next handle */
++    next = data + h->length;
++    while (next - buf + 1 < len && (next[0] != 0 || next[1] != 0))
++      next++;
++    next += 2;
++    /* system-manufacturer */
++    if (h->type == 1 && h->length > 0x04) {
++      ret = strdup (dmi_string (h, data[0x04]));
++      break;
++    }
++
++    data = next;
++    i++;
++  }
++
++  free (buf);
++  return ret;
++}
++
++#define EFI_NOT_FOUND (-1)
++#define EFI_NO_SMBIOS (-2)
++static int
++address_from_efi (size_t *address)
++{
++  FILE *efi_systab;
++  char linebuf[64];
++  int ret;
++
++  *address = 0; /* Prevent compiler warning */
++
++  efi_systab = fopen ("/sys/firmware/efi/systab", "r");
++  if (efi_systab == NULL)
++    /* No EFI interface, fallback to memory scan */
++    return EFI_NOT_FOUND;
++
++  ret = EFI_NO_SMBIOS;
++  while ((fgets (linebuf, sizeof (linebuf) - 1, efi_systab)) != NULL) {
++    char *addrp = strchr (linebuf, '=');
++    *(addrp++) = '\0';
++    if (strcmp (linebuf, "SMBIOS") == 0) {
++      *address = strtoul (addrp, NULL, 0);
++      ret = 0;
++      break;
++    }
++  }
++  fclose (efi_systab);
++
++  return ret;
++}
++
++static char *
++smbios_decode (uint8_t *buf)
++{
++  if (checksum (buf, buf[0x05]) &&
++      memcmp (buf + 0x10, "_DMI_", 5) == 0 &&
++      checksum (buf + 0x10, 0x0F))
++    return dmi_table (DWORD (buf + 0x18), WORD (buf + 0x16),
++                      WORD (buf + 0x1C));
++
++  return NULL;
++}
++
++static char *
++legacy_decode (uint8_t *buf)
++{
++  if (checksum (buf, 0x0F))
++    return dmi_table (DWORD (buf + 0x08), WORD (buf + 0x06),
++                      WORD (buf + 0x0C));
++
++  return NULL;
++}
++
++#endif /* USE_DMI */
++
++static char *
++dmi_system_manufacturer (void)
++{
++#ifdef USE_DMI
++  uint8_t *buf;
++  size_t fp;
++  char *ret = NULL;
++  int efi;
++
++  efi = address_from_efi (&fp);
++  if (efi == EFI_NO_SMBIOS)
++    return NULL;
++
++  if (efi != EFI_NOT_FOUND) {
++    buf = mem_chunk (fp, 0x20);
++    if (buf == NULL)
++      return NULL;
++    ret = smbios_decode (buf);
++    if (ret)
++      goto out;
++  }
++
++  buf = mem_chunk (0xF0000, 0x10000);
++  if (buf == NULL)
++    return NULL;
++
++  for (fp = 0; fp <= 0xFFF0; fp += 16) {
++    if (memcmp (buf + fp, "_SM_", 4) == 0 && fp <= 0xFFE0) {
++      ret = smbios_decode (buf + fp);
++      if (ret)
++        break;
++      fp += 16;
++    } else if (memcmp (buf + fp, "_DMI_", 5) == 0) {
++      ret = legacy_decode (buf + fp);
++      if (ret)
++        break;
++    }
++  }
++
++out:
++  free (buf);
++  return ret;
++#else /* !USE_DMI */
++  return NULL;
++#endif /* USE_DMI */
++}
++
++
+ static inline uint32_t
+ pth_get_size (const PedDevice *dev)
+ {
+@@ -487,16 +746,19 @@ gpt_probe (const PedDevice *dev)
+   if (dev->length <= 1)
+     return 0;
+ 
+-  void *label;
+-  if (!ptt_read_sector (dev, 0, &label))
+-    return 0;
+-
+-  if (!_pmbr_is_valid (label))
++  if (!is_apple)
+     {
++      void *label;
++      if (!ptt_read_sector (dev, 0, &label))
++        return 0;
++
++      if (!_pmbr_is_valid (label))
++        {
++          free (label);
++          return 0;
++        }
+       free (label);
+-      return 0;
+     }
+-  free (label);
+ 
+   void *pth_raw = ped_malloc (pth_get_size (dev));
+   if (ped_device_read (dev, pth_raw, 1, GPT_HEADER_SECTORS)
+@@ -953,6 +1215,10 @@ gpt_read_headers (PedDisk const *disk,
+  *  warn if it's not there, and treat the disk as MSDOS, with a note
+  *  for users to use Parted to "fix up" their disk if they
+  *  really want it to be considered GPT.
++ *
++ *  Of course, this is incompatible with how Apple handle things. For
++ *  legacy BIOS compatibility on Apple machines, we need a valid legacy MBR
++ *  rather than a protective one. Aren't standards wonderful?
+  ************************************************************/
+ static int
+ gpt_read (PedDisk *disk)
+@@ -1161,6 +1427,129 @@ _write_pmbr (PedDevice *dev, bool pmbr_boot)
+   return write_ok;
+ }
+ 
++static void
++fill_raw_part (PartitionRecord_t* raw_part, PedPartition *part, PedSector offset, int number)
++{
++  GPTPartitionData* gpt_part_data = part->disk_specific;
++
++  if (part->fs_type) {
++    if (strncmp (part->fs_type->name, "fat", 3) == 0)
++      raw_part->OSType = 0x0b;
++    else if (strncmp (part->fs_type->name, "ntfs", 4) == 0)
++      raw_part->OSType = 0x07;
++    else if (strncmp (part->fs_type->name, "hfs", 3) == 0)
++      raw_part->OSType = 0xaf;
++    else if (strncmp (part->fs_type->name, "linux-swap", 10) == 0)
++      raw_part->OSType = 0x82;
++    else
++      raw_part->OSType = 0x83;
++  } else
++    raw_part->OSType = 0xda;
++
++  /* Apple's firmware appears to become unhappy if the second partition
++     isn't bootable */
++
++  if (number == 2)
++    raw_part->BootIndicator = 0x80;
++
++  raw_part->StartingLBA = PED_CPU_TO_LE32 ((part->geom.start - offset)
++                            / (part->disk->dev->sector_size / 512));
++
++  raw_part->SizeInLBA = PED_CPU_TO_LE32 (part->geom.length
++                            / (part->disk->dev->sector_size / 512));
++
++  /* EFI system partitions will have a FAT filesystem and
++     PARTITION_SYSTEM_GUID; however, it is not wise to rely on filesystem
++     probing */
++
++  if (number == 1) {
++    if (!guid_cmp (gpt_part_data->type, PARTITION_SYSTEM_GUID) ||
++        !guid_cmp (gpt_part_data->type, PARTITION_BIOS_GRUB_GUID)) {
++      raw_part->OSType = EFI_PMBR_OSTYPE_EFI;
++      raw_part->OSType = EFI_PMBR_OSTYPE_EFI;
++    }
++  }
++
++  /* Apple's firmware also appears to be unhappy if the EFI system
++     partition doesn't extend all the way to the start of the disk */
++
++  if (number == 1 && raw_part->OSType == EFI_PMBR_OSTYPE_EFI) {
++    raw_part->StartSector = 1;
++    raw_part->SizeInLBA += raw_part->StartingLBA - 1;
++    raw_part->StartingLBA = 1;
++  } else {
++    raw_part->StartHead = 0xfe;
++    raw_part->StartSector = 0xff;
++    raw_part->StartTrack = 0xff;
++  }
++
++  raw_part->EndHead = 0xfe;
++  raw_part->EndSector = 0xff;
++  raw_part->EndTrack = 0xff;
++}
++
++static int
++_gptsync (const PedDisk *disk)
++{
++  void *s0;
++  PedPartition* part;
++  int i;
++
++  if (!ptt_read_sector (disk->dev, GPT_PMBR_LBA, &s0))
++    return 0;
++  LegacyMBR_t *pmbr = s0;
++
++  int ok = 0;
++
++  memset(&pmbr->PartitionRecord, 0, sizeof(pmbr->PartitionRecord));
++  pmbr->Signature = PED_CPU_TO_LE16(MSDOS_MBR_SIGNATURE);
++
++  bool prot = false; /* have we found a protective partition? */
++  for (i=1; i<=4; i++) {
++    part = ped_disk_get_partition (disk, i);
++    if (!part)
++      continue;
++
++    fill_raw_part (&pmbr->PartitionRecord [i - 1], part, 0, i);
++    if (pmbr->PartitionRecord[i - 1].OSType == EFI_PMBR_OSTYPE_EFI)
++      prot = true;
++  }
++
++  if (!prot) { /* create one covering the gpt entries */
++    uint32_t prot_size;
++    for (i=2; i>=0; i--)
++      pmbr->PartitionRecord[i + 1] = pmbr->PartitionRecord[i];
++    memset (&pmbr->PartitionRecord[0], 0, sizeof pmbr->PartitionRecord[0]);
++    pmbr->PartitionRecord[0].OSType = EFI_PMBR_OSTYPE_EFI;
++    pmbr->PartitionRecord[0].StartSector = 1;
++    pmbr->PartitionRecord[0].EndHead = 0xfe;
++    pmbr->PartitionRecord[0].EndSector = 0xff;
++    pmbr->PartitionRecord[0].EndTrack = 0xff;
++    pmbr->PartitionRecord[0].StartingLBA = PED_CPU_TO_LE32 (1);
++    if ((disk->dev->length - 1ULL) > 0xFFFFFFFFULL)
++      prot_size = 0xFFFFFFFF;
++    else
++      prot_size = disk->dev->length - 1UL;
++    for (i=1; i<=3; i++) {
++      if (pmbr->PartitionRecord[i].StartingLBA) {
++        uint32_t starting_lba =
++          PED_LE32_TO_CPU (pmbr->PartitionRecord[i].StartingLBA);
++        if (starting_lba - 1 < prot_size)
++          prot_size = starting_lba - 1;
++      }
++    }
++    pmbr->PartitionRecord[0].SizeInLBA = PED_CPU_TO_LE32 (prot_size);
++  }
++
++  if (!ped_device_write (disk->dev, pmbr, GPT_PMBR_LBA, GPT_PMBR_SECTORS))
++    goto error;
++
++  ok = ped_device_sync (disk->dev);
++error:
++  free (s0);
++  return ok;
++}
++
+ static int
+ _generate_header (const PedDisk *disk, int alternate, uint32_t ptes_crc,
+                   GuidPartitionTableHeader_t **gpt_p)
+@@ -1272,9 +1661,15 @@ gpt_write (const PedDisk *disk)
+ 
+   ptes_crc = efi_crc32 (ptes, ptes_bytes);
+ 
+-  /* Write protective MBR */
+-  if (!_write_pmbr (disk->dev, gpt_disk_data->pmbr_boot))
+-    goto error_free_ptes;
++  if (is_apple) {
++    /* Write synced MBR */
++    if (!_gptsync (disk))
++      goto error_free_ptes;
++  } else {
++    /* Write protective MBR */
++    if (!_write_pmbr (disk->dev, gpt_disk_data->pmbr_boot))
++      goto error_free_ptes;
++  }
+ 
+   /* Write PTH and PTEs */
+   /* FIXME: Caution: this code is nearly identical to what's just below. */
+@@ -2055,6 +2450,21 @@ void
+ ped_disk_gpt_init ()
+ {
+   ped_disk_type_register (&gpt_disk_type);
++
++  char *force_gpt_apple = getenv ("PARTED_GPT_APPLE");
++  if (force_gpt_apple) {
++    if (strcmp (force_gpt_apple, "1") == 0)
++      is_apple = 1;
++  } else {
++    char *manufacturer = dmi_system_manufacturer ();
++    if (manufacturer &&
++        (strncasecmp (APPLE_DMI, manufacturer,
++                      strlen (APPLE_DMI)) == 0 ||
++         strncasecmp (APPLE_DMI_2, manufacturer,
++                      strlen (APPLE_DMI_2)) == 0))
++      is_apple = 1;
++    free (manufacturer);
++  }
+ }
+ 
+ void
+diff --git a/tests/Makefile.am b/tests/Makefile.am
+index f9ec6a5..e14610b 100644
+--- a/tests/Makefile.am
++++ b/tests/Makefile.am
+@@ -32,6 +32,7 @@ TESTS = \
+   t0281-gpt-grow.sh \
+   t0282-gpt-move-backup.sh \
+   t0283-overlap-partitions.sh \
++  t0290-gptsync.sh \
+   t0300-dos-on-gpt.sh \
+   t0301-overwrite-gpt-pmbr.sh \
+   t0350-mac-PT-increases-sector-size.sh \
+diff --git a/tests/t0290-gptsync.sh b/tests/t0290-gptsync.sh
+new file mode 100644
+index 0000000..367d61b
+--- /dev/null
++++ b/tests/t0290-gptsync.sh
+@@ -0,0 +1,175 @@
++#!/bin/sh
++# test GPT -> hybrid MBR syncing for Apple systems
++# http://www.rodsbooks.com/gdisk/hybrid.html
++
++# Copyright (C) 2012 Canonical Ltd.
++
++# This program is free software; you can redistribute it and/or modify
++# it under the terms of the GNU General Public License as published by
++# the Free Software Foundation; either version 3 of the License, or
++# (at your option) any later version.
++
++# This program is distributed in the hope that it will be useful,
++# but WITHOUT ANY WARRANTY; without even the implied warranty of
++# MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
++# GNU General Public License for more details.
++
++# You should have received a copy of the GNU General Public License
++# along with this program.  If not, see <http://www.gnu.org/licenses/>.
++
++if test "$VERBOSE" = yes; then
++  set -x
++  parted --version
++fi
++
++: ${srcdir=.}
++. $srcdir/t-lib.sh
++
++require_root_
++require_scsi_debug_module_
++
++ss=$sector_size_
++# must be big enough for a 32MiB partition in order to be big enough for FAT16
++n_sectors=131072
++bootcode_size=446
++mbr_table_size=$((512 - $bootcode_size))
++
++dump_mbr_table () {
++  dd if=$dev bs=1 skip=$bootcode_size count=$mbr_table_size 2>/dev/null | od -v -An -tx1
++}
++
++# create memory-backed device
++sectors_per_MiB=$((1024 * 1024 / $ss))
++n_MiB=$((($n_sectors + $sectors_per_MiB - 1) / $sectors_per_MiB))
++scsi_debug_setup_ dev_size_mb=$n_MiB > dev-name ||
++  skip_test_ 'failed to create scsi_debug device'
++dev=$(cat dev-name)
++
++# force Apple mode
++export PARTED_GPT_APPLE=1
++
++# create gpt label
++parted -s $dev mklabel gpt > empty 2>&1 || fail=1
++compare /dev/null empty || fail=1
++
++# print the empty table
++parted -m -s $dev unit s print > t 2>&1 || fail=1
++sed "s,.*/$dev:,$dev:," t > out || fail=1
++
++# check for expected output
++printf "BYT;\n$dev:${n_sectors}s:scsi:$sector_size_:$sector_size_:gpt:Linux scsi_debug;\n" \
++  > exp || fail=1
++compare exp out || fail=1
++
++# the empty table should have a MBR containing only a protective entry
++dump_mbr_table > out || fail=1
++cat <<EOF > exp || fail=1
++ 00 00 01 00 ee fe ff ff 01 00 00 00 ff ff 01 00
++ 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00
++ 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00
++ 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00
++ 55 aa
++EOF
++compare exp out || fail=1
++
++# create a 32MiB FAT16 EFI System Partition
++parted -s $dev mkpart p1 fat16 2048s 67583s set 1 boot on > empty 2>&1 || fail=1
++compare /dev/null empty || fail=1
++mkfs.vfat -F 16 ${dev}1 >/dev/null || skip_ "mkfs.vfat failed"
++
++# this is represented as a protective partition, but now it only extends as
++# far as the end of the first partition rather than covering the whole disk
++# (matching refit gptsync's strategy); it still starts at sector one
++dump_mbr_table > out || fail=1
++cat <<EOF > exp || fail=1
++ 00 00 01 00 ee fe ff ff 01 00 00 00 ff 07 01 00
++ 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00
++ 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00
++ 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00
++ 55 aa
++EOF
++compare exp out || fail=1
++
++# add a 2MiB ext3 partition
++parted -s $dev mkpart p2 ext3 67584s 71679s > empty 2>&1 || fail=1
++compare /dev/null empty || fail=1
++mkfs.ext3 ${dev}2 >/dev/null 2>&1 || skip_ "mkfs.ext3 failed"
++
++# this should have an MBR representing both partitions; the second partition
++# should be marked bootable
++dump_mbr_table > out || fail=1
++cat <<EOF > exp || fail=1
++ 00 00 01 00 ee fe ff ff 01 00 00 00 ff 07 01 00
++ 80 fe ff ff 83 fe ff ff 00 08 01 00 00 10 00 00
++ 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00
++ 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00
++ 55 aa
++EOF
++compare exp out || fail=1
++
++# add a 1MiB partition with no filesystem
++parted -s $dev mkpart p3 71680s 73727s > empty 2>&1 || fail=1
++compare /dev/null empty || fail=1
++
++# the new partition should be represented as 0xda (Non-FS data)
++dump_mbr_table > out || fail=1
++cat <<EOF > exp || fail=1
++ 00 00 01 00 ee fe ff ff 01 00 00 00 ff 07 01 00
++ 80 fe ff ff 83 fe ff ff 00 08 01 00 00 10 00 00
++ 00 fe ff ff da fe ff ff 00 18 01 00 00 08 00 00
++ 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00
++ 55 aa
++EOF
++compare exp out || fail=1
++
++# add two more 1MiB partitions
++parted -s $dev mkpart p4 73728s 75775s > empty 2>&1 || fail=1
++parted -s $dev mkpart p5 75776s 77823s > empty 2>&1 || fail=1
++
++# only the first four partitions will be represented
++dump_mbr_table > out || fail=1
++cat <<EOF > exp || fail=1
++ 00 00 01 00 ee fe ff ff 01 00 00 00 ff 07 01 00
++ 80 fe ff ff 83 fe ff ff 00 08 01 00 00 10 00 00
++ 00 fe ff ff da fe ff ff 00 18 01 00 00 08 00 00
++ 00 fe ff ff da fe ff ff 00 20 01 00 00 08 00 00
++ 55 aa
++EOF
++compare exp out || fail=1
++
++# convert first partition to a BIOS Boot Partition
++parted -s $dev set 1 boot off set 1 bios_grub on > empty 2>&1 || fail=1
++compare /dev/null empty || fail=1
++
++# this should be represented in the same way as an EFI System Partition
++dump_mbr_table > out || fail=1
++compare exp out || fail=1
++
++# convert first partition to an ordinary FAT partition
++parted -s $dev set 1 bios_grub off > empty 2>&1 || fail=1
++compare /dev/null empty || fail=1
++
++# this should result in a protective partition covering the GPT data up to
++# the start of the first partition, and then representations of the first
++# three partitions
++dump_mbr_table > out || fail=1
++cat <<EOF > exp || fail=1
++ 00 00 01 00 ee fe ff ff 01 00 00 00 ff 07 00 00
++ 00 fe ff ff 0b fe ff ff 00 08 00 00 00 00 01 00
++ 80 fe ff ff 83 fe ff ff 00 08 01 00 00 10 00 00
++ 00 fe ff ff da fe ff ff 00 18 01 00 00 08 00 00
++ 55 aa
++EOF
++compare exp out || fail=1
++
++# convert third partition to a BIOS Boot Partition
++parted -s $dev set 3 bios_grub on > empty 2>&1 || fail=1
++compare /dev/null empty || fail=1
++
++# since this isn't the first partition, it shouldn't become a protective
++# partition or have its starting LBA address set to 1 (and GRUB doesn't care
++# whether it's in the hybrid MBR anyway)
++dump_mbr_table > out || fail=1
++compare exp out || fail=1
++
++Exit $fail

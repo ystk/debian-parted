@@ -4,28 +4,31 @@ Priority: optional
 Maintainer: Parted Maintainer Team <parted-maintainers@lists.alioth.debian.org>
 Uploaders: Otavio Salvador <otavio@debian.org>, Bastian Blank <waldi@debian.org>, Xavier Oswald <xoswald@debian.org>, Colin Watson <cjwatson@debian.org>
 Standards-Version: 3.8.4
-Vcs-Git: git://git.debian.org/git/parted/debian/parted.git
-Vcs-Browser: http://git.debian.org/?p=parted/debian/parted.git
+Vcs-Git: git://anonscm.debian.org/parted/debian/parted.git
+Vcs-Browser: http://anonscm.debian.org/gitweb/?p=parted/debian/parted.git
 Homepage: http://www.gnu.org/software/parted
 Build-Depends:
  dpkg-dev (>= 1.15.7~),
- debhelper (>= 8.1.3),
- quilt,
+ debhelper (>= 9~),
+ dh-exec,
  libncurses-dev | libncurses5-dev,
  libreadline-dev | libreadline6-dev,
- libdevmapper-dev (>= 2:1.02.33) [linux-any],
+ libdevmapper-dev (>= 2:1.02.39) [linux-any],
  uuid-dev,
  gettext,
  texinfo (>= 4.2),
  debianutils (>= 1.13.1),
  libblkid-dev,
- po4a,
  pkg-config,
- check
+ check,
+ dh-autoreconf,
+ autoconf (>= 2.63),
+ automake (>= 1:1.11.6),
+ autopoint
 
 Package: parted
 Architecture: any
-Depends: ${shlibs:Depends}, ${misc:Depends}
+Depends: ${shlibs:Depends}, ${misc:Depends}, libparted2 (= ${binary:Version})
 Suggests: parted-doc
 Conflicts: fsresize, parted1.6
 Replaces: fsresize, parted1.6
@@ -52,32 +55,22 @@ Description: disk partition manipulator
  it, and do so at your own risk.
 
 Package: parted-udeb
-XC-Package-Type: udeb
+Package-Type: udeb
 Architecture: any
 Section: debian-installer
 Priority: extra
 XB-Installer-Menu-Item: 99999
-Depends: ${shlibs:Depends}
+Depends: ${shlibs:Depends}, libparted2-udeb (= ${binary:Version})
 Description: Manually partition a hard drive (parted)
 
-Package: libparted0
-Architecture: any
-Section: libs
-Priority: extra
-Depends: ${misc:Depends}, libparted0debian1 (= ${binary:Version})
-Description: disk partition manipulator - dummy package
- This is a dummy package providing smooth upgrades to
- libparted0debian1. You can safely remove it if no other
- package depends on it.
-
-Package: libparted0debian1
+Package: libparted2
 Architecture: any
 Section: libs
 Pre-Depends: ${misc:Pre-Depends}
 Depends: ${shlibs:Depends}, ${misc:Depends}
-Suggests: parted | nparted, libparted0-dev, libparted0-i18n (= ${source:Version})
-Conflicts: parted (<< 1.4.13+14pre1), libparted1 (<< 2.2), libparted2 (<< 2.2)
-Replaces: libparted0 (<< 2.2-4), libparted1 (<< 2.2), libparted2 (<< 2.2), libparted1.4 (<< 1.4.24-2)
+Suggests: parted | nparted, libparted-dev, libparted-i18n (= ${source:Version})
+Conflicts: parted (<< 1.4.13+14pre1), libparted1 (<< 2.2)
+Replaces: libparted0 (<< 2.2-4), libparted1 (<< 2.2), libparted1.4 (<< 1.4.24-2)
 Provides: libparted
 Breaks: python-parted (<< 3.6-5)
 Multi-Arch: same
@@ -89,8 +82,24 @@ Description: disk partition manipulator - shared library
  .
  This package contains the shared library.
 
-Package: libparted0-udeb
-XC-Package-Type: udeb
+Package: libparted-fs-resize0
+Architecture: any
+Section: libs
+Pre-Depends: ${misc:Pre-Depends}
+Depends: ${shlibs:Depends}, ${misc:Depends}, libparted2 (= ${binary:Version})
+Suggests: libparted-dev
+Multi-Arch: same
+Description: disk partition manipulator - shared FS resizing library
+ GNU Parted is a program that allows you to create, destroy, resize,
+ move, and copy disk partitions. This is useful for creating space
+ for new operating systems, reorganizing disk usage, and copying data
+ to new hard disks.
+ .
+ This package contains the libparted-fs-resize shared library for
+ resizing HFS+ and FAT file systems.
+
+Package: libparted2-udeb
+Package-Type: udeb
 Architecture: any
 Section: debian-installer
 Priority: extra
@@ -103,13 +112,28 @@ Description: disk partition manipulator - library udeb
  .
  This is a cut-down library package for use in debian-installer.
 
-Package: libparted0-i18n
+Package: libparted-fs-resize0-udeb
+Package-Type: udeb
+Architecture: any
+Section: debian-installer
+Priority: extra
+Depends: ${shlibs:Depends}, ${misc:Depends}, libparted2-udeb (= ${binary:Version})
+Description: disk partition manipulator - FS resizing library udeb
+ GNU Parted is a program that allows you to create, destroy, resize,
+ move, and copy disk partitions. This is useful for creating space
+ for new operating systems, reorganizing disk usage, and copying data
+ to new hard disks.
+ .
+ This is a cut-down library package for use in debian-installer.  It
+ contains the libparted-fs-resize shared library for resizing HFS+ and
+ FAT file systems.
+
+Package: libparted-i18n
 Architecture: all
 Section: localization
-Depends: libparted0debian1, ${misc:Depends}
-Replaces: libparted1 (<< 2.2), libparted2 (<< 2.2), libparted1.4 (<< 1.4.24-2), libparted1.6 (<< 1.5+1.6.0-pre3-2), libparted1.4-i18n, parted (<< 1.4.13+14pre1)
-Conflicts: libparted-i18n
-Provides: libparted-i18n
+Depends: libparted2, ${misc:Depends}
+Replaces: libparted1 (<< 2.2), libparted2 (<< 2.2), libparted1.4 (<< 1.4.24-2), libparted1.6 (<< 1.5+1.6.0-pre3-2), libparted1.4-i18n, libparted0-i18n, parted (<< 1.4.13+14pre1)
+Conflicts: libparted0-i18n
 Description: disk partition manipulator - i18n support
  GNU Parted is a program that allows you to create, destroy, resize,
  move, and copy disk partitions. This is useful for creating space
@@ -118,14 +142,15 @@ Description: disk partition manipulator - i18n support
  .
  This package contains localization data.
 
-Package: libparted0-dev
+Package: libparted-dev
 Architecture: any
 Section: libdevel
-Depends: libc6-dev, libparted0debian1 (= ${binary:Version}), libdevmapper-dev (>= 1.02.33) [linux-any], uuid-dev, libblkid-dev, ${misc:Depends}
+Depends: libc6-dev, libparted2 (= ${binary:Version}), libparted-fs-resize0 (= ${binary:Version}), libdevmapper-dev (>= 1.02.33) [linux-any], uuid-dev, libblkid-dev, ${misc:Depends}
 Suggests: parted (= ${binary:Version}), parted-doc
-Conflicts: libparted-dev, parted (<< 1.2.11)
-Replaces: libparted-dev, libparted2-dev (<< 2.2)
-Provides: libparted-dev
+Conflicts: parted (<< 1.2.11)
+Breaks: libparted0-dev (<< 3.1-1~)
+Replaces: libparted0-dev (<< 3.1-1~), libparted2-dev (<< 2.2)
+Multi-Arch: same
 Description: disk partition manipulator - development files
  GNU Parted is a program that allows you to create, destroy, resize,
  move, and copy disk partitions. This is useful for creating space
@@ -135,11 +160,25 @@ Description: disk partition manipulator - development files
  This package contains the static library and header files for
  libparted, which are really only of interest to parted developers.
 
-Package: libparted0debian1-dbg
+Package: libparted0-dev
+Architecture: all
+Section: oldlibs
+Priority: extra
+Depends: ${misc:Depends}, libparted-dev (>= ${source:Version})
+Description: disk partition manipulator - transitional package
+ GNU Parted is a program that allows you to create, destroy, resize,
+ move, and copy disk partitions. This is useful for creating space
+ for new operating systems, reorganizing disk usage, and copying data
+ to new hard disks.
+ .
+ This is a transitional package to ease the migration to the new
+ unversioned libparted-dev package, which should be used in preference.
+
+Package: libparted2-dbg
 Architecture: any
 Section: debug
 Priority: extra
-Depends: libparted0debian1 (= ${binary:Version}), libparted0-dev (= ${binary:Version}), ${misc:Depends}
+Depends: libparted2 (= ${binary:Version}), ${misc:Depends}
 Conflicts: libparted-dbg
 Replaces: libparted-dbg, libparted0-dbg (<< 2.2-4)
 Provides: libparted-dbg
@@ -149,17 +188,28 @@ Description: disk partition manipulator - debugging symbols
  for new operating systems, reorganizing disk usage, and copying data
  to new hard disks.
  .
- This package contains the debugging static library for libparted,
- which is really only of interest to parted developers who need to
- debug their programs.
+ This package contains debugging symbols for libparted, which are really
+ only of interest to parted developers who need to debug their programs.
+
+Package: libparted-fs-resize0-dbg
+Architecture: any
+Section: debug
+Priority: extra
+Depends: libparted-fs-resize0 (= ${binary:Version}), ${misc:Depends}
+Description: disk partition manipulator - FS resizing debugging symbols
+ GNU Parted is a program that allows you to create, destroy, resize,
+ move, and copy disk partitions. This is useful for creating space
+ for new operating systems, reorganizing disk usage, and copying data
+ to new hard disks.
  .
- The debugging libraries are installed as /usr/lib/libparted_g.a
- Link specifically with them if you want to debug.
+ This package contains debugging symbols for libparted-fs-resize, which
+ are really only of interest to parted developers who need to debug
+ their programs.
 
 Package: parted-doc
 Architecture: all
 Section: doc
-Suggests: parted | libparted0-dev
+Suggests: parted | libparted-dev
 Conflicts: parted1.6-doc
 Replaces: parted1.6-doc
 Depends: ${misc:Depends}, install-info

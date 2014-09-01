@@ -1,6 +1,18 @@
---- a/libparted/arch/gnu.c.original	2012-04-22 00:06:18.000000000 +0000
-+++ b/libparted/arch/gnu.c	2012-04-22 02:34:58.000000000 +0000
-@@ -185,7 +185,7 @@
+From cf52f4844ea272e55de976e7ea3b66b6c0e5336d Mon Sep 17 00:00:00 2001
+From: Colin Watson <cjwatson@ubuntu.com>
+Date: Fri, 28 Mar 2014 17:09:54 +0000
+Subject: Implement partition table rereading on GNU/Hurd
+
+Patch-Name: hurd-reread.patch
+---
+ libparted/arch/gnu.c | 84 ++++++++++++++++++++++++++++++++++++++++++++++++----
+ 1 file changed, 78 insertions(+), 6 deletions(-)
+
+diff --git a/libparted/arch/gnu.c b/libparted/arch/gnu.c
+index 5a1c73e..ba384fb 100644
+--- a/libparted/arch/gnu.c
++++ b/libparted/arch/gnu.c
+@@ -185,7 +185,7 @@ _init_device (const char *path)
  	if (!dev->arch_specific)
  		goto error_free_path;
  
@@ -9,23 +21,21 @@
  	dev->open_count = 0;
  	dev->read_only = 0;
  	dev->external_mode = 0;
-@@ -204,11 +204,83 @@
+@@ -204,11 +204,83 @@ error:
  	return NULL;
  }
  
--static int
--_kernel_reread_part_table (PedDevice* dev)
--{
--	/* XXX: We must wait for partfs to be finished.  */
--	return 1;
 +/* Ask the kernel and translators to reload the partition table.
 +   XXX: Will probably be replaced by some RPC to partfs when it's finished.  In
 +   the meantime, gnumach's glue layer will pass BLKRRPART to the Linux drivers.
 +   */
 +#define BLKRRPART 0x125F
-+static int
+ static int
+-_kernel_reread_part_table (PedDevice* dev)
 +_reread_part_table (PedDevice* dev)
-+{
+ {
+-	/* XXX: We must wait for partfs to be finished.  */
+-	return 1;
 +	struct store *store = GNU_SPECIFIC (dev)->store;
 +	int retry_count = 9;
 +	int len = strlen (dev->path);
@@ -98,7 +108,7 @@
  }
  
  /* Free the memory associated with a PedDevice structure.  */
-@@ -355,7 +427,7 @@
+@@ -355,7 +427,7 @@ gnu_close (PedDevice* dev)
  	_flush_cache (dev);
  
  	if (dev->dirty && dev->type != PED_DEVICE_FILE) {
@@ -107,7 +117,7 @@
  			dev->dirty = 0;
  	}
  
-@@ -858,7 +930,7 @@
+@@ -858,7 +930,7 @@ gnu_partition_is_busy (const PedPartition* part)
  static int
  gnu_disk_commit (PedDisk* disk)
  {

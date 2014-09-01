@@ -1,7 +1,7 @@
 #!/bin/sh
 # avoid segfault creating a dos PT on top of a gpt one
 
-# Copyright (C) 2009-2010 Free Software Foundation, Inc.
+# Copyright (C) 2009-2014 Free Software Foundation, Inc.
 
 # This program is free software; you can redistribute it and/or modify
 # it under the terms of the GNU General Public License as published by
@@ -16,31 +16,21 @@
 # You should have received a copy of the GNU General Public License
 # along with this program.  If not, see <http://www.gnu.org/licenses/>.
 
-if test "$VERBOSE" = yes; then
-  set -x
-  parted --version
-fi
-
-: ${srcdir=.}
-. $srcdir/t-lib.sh
-
-PARTED_SECTOR_SIZE=4096
-export PARTED_SECTOR_SIZE
-
-fail=0
+. "${srcdir=.}/init.sh"; path_prepend_ ../parted
+ss=$sector_size_
 
 dev=loop-file
 # create a backing file large enough for a GPT partition table
-dd if=/dev/null of=$dev seek=4001 2> /dev/null || framework_failure
+dd if=/dev/null of=$dev bs=$ss seek=80 2> /dev/null || framework_failure
 
 # create a GPT partition table
 parted -s $dev mklabel gpt > out 2>&1 || fail=1
 # expect no output
-compare out /dev/null || fail=1
+compare /dev/null out || fail=1
 
 # create a DOS partition table on top of it
 parted -s $dev mklabel msdos > out 2>&1 || fail=1
 # expect no output
-compare out /dev/null || fail=1
+compare /dev/null out || fail=1
 
 Exit $fail

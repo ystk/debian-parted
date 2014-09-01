@@ -1,7 +1,6 @@
 /*
     parted - a frontend to libparted
-    Copyright (C) 1999-2000, 2007, 2009-2010 Free Software Foundation,
-    Inc.
+    Copyright (C) 1999-2000, 2007, 2009-2014 Free Software Foundation, Inc.
 
     This program is free software; you can redistribute it and/or modify
     it under the terms of the GNU General Public License as published by
@@ -25,14 +24,14 @@
 
 typedef struct {
 	StrList*	names;
-	int		(*method) (PedDevice** dev);
+	int		(*method) (PedDevice** dev, PedDisk** diskp);
 	StrList*	summary;
 	StrList*	help;
         int             non_interactive:1;
 } Command;
 
 extern Command* command_create (const StrList* names,
-				int (*method) (PedDevice** dev),
+				int (*method) (PedDevice** dev, PedDisk** diskp),
 				const StrList* summary,
 				const StrList* help,
                                 int non_interactive);
@@ -43,6 +42,6 @@ extern Command* command_get (Command** list, char* name);
 extern StrList* command_get_names (Command** list);
 extern void command_print_summary (Command* cmd);
 extern void command_print_help (Command* cmd);
-extern int command_run (Command* cmd, PedDevice** dev);
+extern int command_run (Command* cmd, PedDevice** dev, PedDisk** diskp);
 
 #endif /* COMMAND_H_INCLUDED */

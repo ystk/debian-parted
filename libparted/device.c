@@ -1,6 +1,6 @@
 /*
     libparted - a library for manipulating disk partitions
-    Copyright (C) 1999 - 2001, 2005, 2007-2009 Free Software Foundation, Inc.
+    Copyright (C) 1999 - 2001, 2005, 2007-2010 Free Software Foundation, Inc.
 
     This program is free software; you can redistribute it and/or modify
     it under the terms of the GNU General Public License as published by
@@ -110,7 +110,7 @@ _ped_device_probe (const char* path)
 {
 	PedDevice*	dev;
 
-	PED_ASSERT (path != NULL, return);
+	PED_ASSERT (path != NULL);
 
 	ped_exception_fetch_all ();
 	dev = ped_device_get (path);
@@ -151,9 +151,12 @@ ped_device_get (const char* path)
 	PedDevice*	walk;
 	char*		normal_path = NULL;
 
-	PED_ASSERT (path != NULL, return NULL);
-	/* Don't canonicalize /dev/mapper paths, see tests/symlink.c */
-	if (strncmp (path, "/dev/mapper/", 12))
+	PED_ASSERT (path != NULL);
+	/* Don't canonicalize /dev/mapper or /dev/md/ paths, see
+	   tests/symlink.c
+	*/
+	if (strncmp (path, "/dev/mapper/", 12) &&
+	    strncmp (path, "/dev/md/", 8))
 		normal_path = canonicalize_file_name (path);
 	if (!normal_path)
 		/* Well, maybe it is just that the file does not exist.
@@ -224,8 +227,8 @@ ped_device_open (PedDevice* dev)
 {
 	int	status;
 
-	PED_ASSERT (dev != NULL, return 0);
-	PED_ASSERT (!dev->external_mode, return 0);
+	PED_ASSERT (dev != NULL);
+	PED_ASSERT (!dev->external_mode);
 
 	if (dev->open_count)
 		status = ped_architecture->dev_ops->refresh_open (dev);
@@ -246,9 +249,9 @@ ped_device_open (PedDevice* dev)
 int
 ped_device_close (PedDevice* dev)
 {
-	PED_ASSERT (dev != NULL, return 0);
-	PED_ASSERT (!dev->external_mode, return 0);
-	PED_ASSERT (dev->open_count > 0, return 0);
+	PED_ASSERT (dev != NULL);
+	PED_ASSERT (!dev->external_mode);
+	PED_ASSERT (dev->open_count > 0);
 
 	if (--dev->open_count)
 		return ped_architecture->dev_ops->refresh_close (dev);
@@ -283,8 +286,8 @@ ped_device_close (PedDevice* dev)
 int
 ped_device_begin_external_access (PedDevice* dev)
 {
-	PED_ASSERT (dev != NULL, return 0);
-	PED_ASSERT (!dev->external_mode, return 0);
+	PED_ASSERT (dev != NULL);
+	PED_ASSERT (!dev->external_mode);
 
 	dev->external_mode = 1;
 	if (dev->open_count)
@@ -303,8 +306,8 @@ ped_device_begin_external_access (PedDevice* dev)
 int
 ped_device_end_external_access (PedDevice* dev)
 {
-	PED_ASSERT (dev != NULL, return 0);
-	PED_ASSERT (dev->external_mode, return 0);
+	PED_ASSERT (dev != NULL);
+	PED_ASSERT (dev->external_mode);
 
 	dev->external_mode = 0;
 	if (dev->open_count)
@@ -323,10 +326,10 @@ int
 ped_device_read (const PedDevice* dev, void* buffer, PedSector start,
                  PedSector count)
 {
-        PED_ASSERT (dev != NULL, return 0);
-        PED_ASSERT (buffer != NULL, return 0);
-        PED_ASSERT (!dev->external_mode, return 0);
-        PED_ASSERT (dev->open_count > 0, return 0);
+        PED_ASSERT (dev != NULL);
+        PED_ASSERT (buffer != NULL);
+        PED_ASSERT (!dev->external_mode);
+        PED_ASSERT (dev->open_count > 0);
 
         return (ped_architecture->dev_ops->read) (dev, buffer, start, count);
 }
@@ -344,10 +347,10 @@ int
 ped_device_write (PedDevice* dev, const void* buffer, PedSector start,
 		  PedSector count)
 {
-	PED_ASSERT (dev != NULL, return 0);
-	PED_ASSERT (buffer != NULL, return 0);
-	PED_ASSERT (!dev->external_mode, return 0);
-	PED_ASSERT (dev->open_count > 0, return 0);
+	PED_ASSERT (dev != NULL);
+	PED_ASSERT (buffer != NULL);
+	PED_ASSERT (!dev->external_mode);
+	PED_ASSERT (dev->open_count > 0);
 
 	return (ped_architecture->dev_ops->write) (dev, buffer, start, count);
 }
@@ -356,9 +359,9 @@ PedSector
 ped_device_check (PedDevice* dev, void* buffer, PedSector start,
 		  PedSector count)
 {
-	PED_ASSERT (dev != NULL, return 0);
-	PED_ASSERT (!dev->external_mode, return 0);
-	PED_ASSERT (dev->open_count > 0, return 0);
+	PED_ASSERT (dev != NULL);
+	PED_ASSERT (!dev->external_mode);
+	PED_ASSERT (dev->open_count > 0);
 
 	return (ped_architecture->dev_ops->check) (dev, buffer, start, count);
 }
@@ -373,9 +376,9 @@ ped_device_check (PedDevice* dev, void* buffer, PedSector start,
 int
 ped_device_sync (PedDevice* dev)
 {
-	PED_ASSERT (dev != NULL, return 0);
-	PED_ASSERT (!dev->external_mode, return 0);
-	PED_ASSERT (dev->open_count > 0, return 0);
+	PED_ASSERT (dev != NULL);
+	PED_ASSERT (!dev->external_mode);
+	PED_ASSERT (dev->open_count > 0);
 
 	return ped_architecture->dev_ops->sync (dev);
 }
@@ -390,9 +393,9 @@ ped_device_sync (PedDevice* dev)
 int
 ped_device_sync_fast (PedDevice* dev)
 {
-	PED_ASSERT (dev != NULL, return 0);
-	PED_ASSERT (!dev->external_mode, return 0);
-	PED_ASSERT (dev->open_count > 0, return 0);
+	PED_ASSERT (dev != NULL);
+	PED_ASSERT (!dev->external_mode);
+	PED_ASSERT (dev->open_count > 0);
 
 	return ped_architecture->dev_ops->sync_fast (dev);
 }
@@ -554,7 +557,8 @@ ped_device_get_optimum_alignment(const PedDevice *dev)
                 default:
                         /* Align to a grain of 1MiB (like vista / win7) */
                         align = ped_alignment_new(0,
-                                                  1048576 / dev->sector_size);
+                                                  (PED_DEFAULT_ALIGNMENT
+						   / dev->sector_size));
                 }
         }
 

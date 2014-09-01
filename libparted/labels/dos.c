@@ -1,7 +1,7 @@
 /*
     libparted - a library for manipulating disk partitions
-    Copyright (C) 1999-2001, 2004-2005, 2007-2010 Free Software
-    Foundation, Inc.
+    Copyright (C) 1999-2001, 2004-2005, 2007-2014 Free Software Foundation,
+    Inc.
 
     This program is free software; you can redistribute it and/or modify
     it under the terms of the GNU General Public License as published by
@@ -85,12 +85,14 @@ static const char MBR_BOOT_CODE[] = {
 #define PARTITION_LDM		0x42
 #define PARTITION_LINUX_SWAP	0x82
 #define PARTITION_LINUX		0x83
+#define PARTITION_IRST		0x84
 #define PARTITION_LINUX_EXT	0x85
 #define PARTITION_LINUX_LVM	0x8e
 #define PARTITION_HFS		0xaf
 #define PARTITION_SUN_UFS	0xbf
 #define PARTITION_DELL_DIAG	0xde
 #define PARTITION_GPT		0xee
+#define PARTITION_ESP		0xef
 #define PARTITION_PALO		0xf0
 #define PARTITION_PREP		0x41
 #define PARTITION_LINUX_RAID	0xfd
@@ -103,7 +105,7 @@ static const char MBR_BOOT_CODE[] = {
  * (i.e. 1022 is sometimes used to indicate "use LBA").
  */
 #define MAX_CHS_CYLINDER	1021
-#define MAX_TOTAL_PART		16
+#define MAX_TOTAL_PART		64
 
 typedef struct _DosRawPartition		DosRawPartition;
 typedef struct _DosRawTable		DosRawTable;
@@ -159,10 +161,88 @@ typedef struct {
 	int		palo;
 	int		prep;
 	int		diag;
+	int		irst;
+	int		esp;
 	OrigState*	orig;			/* used for CHS stuff */
 } DosPartitionData;
 
 static PedDiskType msdos_disk_type;
+
+#if 0
+From http://www.win.tue.nl/~aeb/linux/fs/fat/fat-1.html
+
+The 2-byte numbers are stored little endian (low order byte first).
+
+Here the FAT12 version, that is also the common part of the FAT12, FAT16 and FAT32 boot sectors. See further below.
+
+Bytes   Content
+0-2     Jump to bootstrap (E.g. eb 3c 90; on i86: JMP 003E NOP.
+        One finds either eb xx 90, or e9 xx xx.
+        The position of the bootstrap varies.)
+3-10    OEM name/version (E.g. "IBM  3.3", "IBM 20.0", "MSDOS5.0", "MSWIN4.0".
+        Various format utilities leave their own name, like "CH-FOR18".
+        Sometimes just garbage. Microsoft recommends "MSWIN4.1".)
+        /* BIOS Parameter Block starts here */
+11-12   Number of bytes per sector (512)
+        Must be one of 512, 1024, 2048, 4096.
+13      Number of sectors per cluster (1)
+        Must be one of 1, 2, 4, 8, 16, 32, 64, 128.
+        A cluster should have at most 32768 bytes. In rare cases 65536 is OK.
+14-15   Number of reserved sectors (1)
+        FAT12 and FAT16 use 1. FAT32 uses 32.
+16      Number of FAT copies (2)
+17-18   Number of root directory entries (224)
+        0 for FAT32. 512 is recommended for FAT16.
+19-20   Total number of sectors in the filesystem (2880)
+        (in case the partition is not FAT32 and smaller than 32 MB)
+21      Media descriptor type (f0: 1.4 MB floppy, f8: hard disk; see below)
+22-23   Number of sectors per FAT (9)
+        0 for FAT32.
+24-25   Number of sectors per track (12)
+26-27   Number of heads (2, for a double-sided diskette)
+28-29   Number of hidden sectors (0)
+        Hidden sectors are sectors preceding the partition.
+        /* BIOS Parameter Block ends here */
+30-509  Bootstrap
+510-511 Signature 55 aa
+#endif
+
+/* There is a significant risk of misclassifying (as msdos)
+   a disk that is composed solely of a single FAT partition.
+   Return false if sector S could not be a valid FAT boot sector.
+   Otherwise, return true.  */
+static bool
+maybe_FAT (unsigned char const *s)
+{
+  if (! (s[0] == 0xeb || s[0] == 0xe9))
+    return false;
+
+  unsigned int sector_size = PED_LE16_TO_CPU (*(uint16_t *) (s + 11));
+  switch (sector_size)
+    {
+    case 512:
+    case 1024:
+    case 2048:
+    case 4096:
+      break;
+    default:
+      return false;
+    }
+
+  if (! (s[21] == 0xf0 || s[21] == 0xf8))
+    return false;
+
+  return true;
+}
+
+PedGeometry*
+fat_probe_fat16 (PedGeometry* geom);
+
+PedGeometry*
+fat_probe_fat32 (PedGeometry* geom);
+
+PedGeometry*
+ntfs_probe (PedGeometry* geom);
 
 static int
 msdos_probe (const PedDevice *dev)
@@ -170,8 +250,10 @@ msdos_probe (const PedDevice *dev)
 	PedDiskType*	disk_type;
 	DosRawTable*	part_table;
 	int		i;
+	PedGeometry *geom = NULL;
+	PedGeometry *fsgeom = NULL;
 
-	PED_ASSERT (dev != NULL, return 0);
+	PED_ASSERT (dev != NULL);
 
         if (dev->sector_size < sizeof *part_table)
                 return 0;
@@ -186,16 +268,38 @@ msdos_probe (const PedDevice *dev)
 	if (PED_LE16_TO_CPU (part_table->magic) != MSDOS_MAGIC)
 		goto probe_fail;
 
+	geom = ped_geometry_new (dev, 0, dev->length);
+	PED_ASSERT (geom);
+	fsgeom = fat_probe_fat16 (geom);
+	if (fsgeom)
+		goto probe_fail; /* fat fs looks like dos mbr */
+	fsgeom = fat_probe_fat32 (geom);
+	if (fsgeom)
+		goto probe_fail; /* fat fs looks like dos mbr */
+	fsgeom = ntfs_probe (geom);
+	if (fsgeom)
+		goto probe_fail; /* ntfs fs looks like dos mbr */
+	ped_geometry_destroy (geom);
+	geom = NULL;
+
 	/* If this is a FAT fs, fail here.  Checking for the FAT signature
 	 * has some false positives; instead, do what the Linux kernel does
 	 * and ensure that each partition has a boot indicator that is
 	 * either 0 or 0x80.
 	 */
+	unsigned int n_active = 0;
 	for (i = 0; i < DOS_N_PRI_PARTITIONS; i++) {
+		if (part_table->partitions[i].boot_ind == 0x80)
+			++n_active;
 		if (part_table->partitions[i].boot_ind != 0
 		    && part_table->partitions[i].boot_ind != 0x80)
 			goto probe_fail;
 	}
+
+	/* If there are no active partitions and this is probably
+	   a FAT file system, do not classify it as msdos.  */
+	if (n_active == 0 && maybe_FAT (label))
+	  goto probe_fail;
 
 	/* If this is a GPT disk, fail here */
 	for (i = 0; i < DOS_N_PRI_PARTITIONS; i++) {
@@ -224,6 +328,10 @@ msdos_probe (const PedDevice *dev)
 	return 1;
 
  probe_fail:
+	if (geom)
+		ped_geometry_destroy (geom);
+	if (fsgeom)
+		ped_geometry_destroy (fsgeom);
 	free (label);
 	return 0;
 }
@@ -232,7 +340,7 @@ static PedDisk*
 msdos_alloc (const PedDevice* dev)
 {
 	PedDisk* disk;
-	PED_ASSERT (dev != NULL, return NULL);
+	PED_ASSERT (dev != NULL);
 
 	disk = _ped_disk_alloc ((PedDevice*)dev, &msdos_disk_type);
         if (disk) {
@@ -266,7 +374,7 @@ msdos_duplicate (const PedDisk* disk)
 static void
 msdos_free (PedDisk* disk)
 {
-	PED_ASSERT (disk != NULL, return);
+	PED_ASSERT (disk != NULL);
 
 	DosDiskData *disk_specific = disk->disk_specific;
 	_ped_disk_free (disk);
@@ -328,7 +436,7 @@ chs_get_sector (const RawCHS* chs)
 	return (chs->sector & 0x3f) - 1;
 }
 
-static PedSector
+static PedSector _GL_ATTRIBUTE_PURE
 chs_to_sector (const PedDevice* dev, const PedCHSGeometry *bios_geom,
 	       const RawCHS* chs)
 {
@@ -336,8 +444,8 @@ chs_to_sector (const PedDevice* dev, const PedCHSGeometry *bios_geom,
 	PedSector	h;		/* lots of bits */
 	PedSector	s;
 
-	PED_ASSERT (bios_geom != NULL, return 0);
-	PED_ASSERT (chs != NULL, return 0);
+	PED_ASSERT (bios_geom != NULL);
+	PED_ASSERT (chs != NULL);
 
 	c = chs_get_cylinder (chs);
 	h = chs_get_head (chs);
@@ -356,8 +464,8 @@ sector_to_chs (const PedDevice* dev, const PedCHSGeometry* bios_geom,
 {
 	PedSector	real_c, real_h, real_s;
 
-	PED_ASSERT (dev != NULL, return);
-	PED_ASSERT (chs != NULL, return);
+	PED_ASSERT (dev != NULL);
+	PED_ASSERT (chs != NULL);
 
 	if (!bios_geom)
 		bios_geom = &dev->bios_geom;
@@ -377,58 +485,58 @@ sector_to_chs (const PedDevice* dev, const PedCHSGeometry* bios_geom,
 	chs->sector = real_s + 1 + (real_c >> 8 << 6);
 }
 
-static PedSector
+static PedSector _GL_ATTRIBUTE_PURE
 legacy_start (const PedDisk* disk, const PedCHSGeometry* bios_geom,
 	      const DosRawPartition* raw_part)
 {
-	PED_ASSERT (disk != NULL, return 0);
-	PED_ASSERT (raw_part != NULL, return 0);
+	PED_ASSERT (disk != NULL);
+	PED_ASSERT (raw_part != NULL);
 
 	return chs_to_sector (disk->dev, bios_geom, &raw_part->chs_start);
 }
 
-static PedSector
+static PedSector _GL_ATTRIBUTE_PURE
 legacy_end (const PedDisk* disk, const PedCHSGeometry* bios_geom,
 	    const DosRawPartition* raw_part)
 {
-	PED_ASSERT (disk != NULL, return 0);
-	PED_ASSERT (raw_part != NULL, return 0);
+	PED_ASSERT (disk != NULL);
+	PED_ASSERT (raw_part != NULL);
 
 	return chs_to_sector (disk->dev, bios_geom, &raw_part->chs_end);
 }
 
-static PedSector
+static PedSector _GL_ATTRIBUTE_PURE
 linear_start (const PedDisk* disk, const DosRawPartition* raw_part,
 	      PedSector offset)
 {
-	PED_ASSERT (disk != NULL, return 0);
-	PED_ASSERT (raw_part != NULL, return 0);
+	PED_ASSERT (disk != NULL);
+	PED_ASSERT (raw_part != NULL);
 
 	return offset + PED_LE32_TO_CPU (raw_part->start);
 }
 
-static PedSector
+static PedSector _GL_ATTRIBUTE_PURE
 linear_end (const PedDisk* disk, const DosRawPartition* raw_part,
 	    PedSector offset)
 {
-	PED_ASSERT (disk != NULL, return 0);
-	PED_ASSERT (raw_part != NULL, return 0);
+	PED_ASSERT (disk != NULL);
+	PED_ASSERT (raw_part != NULL);
 
 	return (linear_start (disk, raw_part, offset)
                 + (PED_LE32_TO_CPU (raw_part->length) - 1));
 }
 
 #ifndef DISCOVER_ONLY
-static int
+static int _GL_ATTRIBUTE_PURE
 partition_check_bios_geometry (PedPartition* part, PedCHSGeometry* bios_geom)
 {
 	PedSector		leg_start, leg_end;
 	DosPartitionData*	dos_data;
 	PedDisk*		disk;
 
-	PED_ASSERT (part != NULL, return 0);
-	PED_ASSERT (part->disk != NULL, return 0);
-	PED_ASSERT (part->disk_specific != NULL, return 0);
+	PED_ASSERT (part != NULL);
+	PED_ASSERT (part->disk != NULL);
+	PED_ASSERT (part->disk_specific != NULL);
 	dos_data = part->disk_specific;
 
 	if (!dos_data->orig)
@@ -445,12 +553,12 @@ partition_check_bios_geometry (PedPartition* part, PedCHSGeometry* bios_geom)
 	return 1;
 }
 
-static int
+static int _GL_ATTRIBUTE_PURE
 disk_check_bios_geometry (const PedDisk* disk, PedCHSGeometry* bios_geom)
 {
 	PedPartition* part = NULL;
 
-	PED_ASSERT (disk != NULL, return 0);
+	PED_ASSERT (disk != NULL);
 
 	while ((part = ped_disk_next_partition (disk, part))) {
 		if (ped_partition_is_active (part)) {
@@ -473,12 +581,11 @@ probe_filesystem_for_geom (const PedPartition* part, PedCHSGeometry* bios_geom)
 	int heads;
 	int res = 0;
 
-	PED_ASSERT (bios_geom        != NULL, return 0);
-        PED_ASSERT (part             != NULL, return 0);
-        PED_ASSERT (part->disk       != NULL, return 0);
-        PED_ASSERT (part->disk->dev  != NULL, return 0);
-        PED_ASSERT (part->disk->dev->sector_size % PED_SECTOR_SIZE_DEFAULT == 0,
-                    return 0);
+	PED_ASSERT (bios_geom        != NULL);
+        PED_ASSERT (part             != NULL);
+        PED_ASSERT (part->disk       != NULL);
+        PED_ASSERT (part->disk->dev  != NULL);
+        PED_ASSERT (part->disk->dev->sector_size % PED_SECTOR_SIZE_DEFAULT == 0);
 
         buf = ped_malloc (part->disk->dev->sector_size);
 
@@ -564,9 +671,9 @@ probe_partition_for_geom (const PedPartition* part, PedCHSGeometry* bios_geom)
 	PedSector cyl_size, head_size;
 	PedSector cylinders, heads, sectors;
 
-	PED_ASSERT (part != NULL, return 0);
-	PED_ASSERT (part->disk_specific != NULL, return 0);
-	PED_ASSERT (bios_geom != NULL, return 0);
+	PED_ASSERT (part != NULL);
+	PED_ASSERT (part->disk_specific != NULL);
+	PED_ASSERT (bios_geom != NULL);
 
 	dos_data = part->disk_specific;
 
@@ -645,8 +752,10 @@ probe_partition_for_geom (const PedPartition* part, PedCHSGeometry* bios_geom)
 	if (cyl_size * denum != a_*H - A_*h)
 		return 0;
 
-	PED_ASSERT (cyl_size > 0, return 0);
- 	PED_ASSERT (cyl_size <= 255 * 63, return 0);
+	if (!(cyl_size > 0))
+		return 0;
+	if (!(cyl_size <= 255 * 63))
+		return 0;
 
 	if (h > 0)
 		head_size = ( a_ - c * cyl_size ) / h;
@@ -654,21 +763,27 @@ probe_partition_for_geom (const PedPartition* part, PedCHSGeometry* bios_geom)
 		head_size = ( A_ - C * cyl_size ) / H;
 	else {
 		/* should not happen because denum != 0 */
-		PED_ASSERT (0, return 0);
+		PED_ASSERT (0);
 	}
 
-	PED_ASSERT (head_size > 0, return 0);
-	PED_ASSERT (head_size <= 63, return 0);
+	if (!(head_size > 0))
+		return 0;
+	if (!(head_size <= 63))
+		return 0;
 
 	cylinders = part->disk->dev->length / cyl_size;
 	heads = cyl_size / head_size;
 	sectors = head_size;
 
-	PED_ASSERT (heads > 0, return 0);
-	PED_ASSERT (heads < 256, return 0);
+	if (!(heads > 0))
+		return 0;
+	if (!(heads < 256))
+		return 0;
 
-	PED_ASSERT (sectors > 0, return 0);
-	PED_ASSERT (sectors <= 63, return 0);
+	if (!(sectors > 0))
+		return 0;
+	if (!(sectors <= 63))
+		return 0;
 
 	/* Some broken OEM partitioning program(s) seem to have an out-by-one
 	 * error on the end of partitions.  We should offer to fix the
@@ -677,8 +792,10 @@ probe_partition_for_geom (const PedPartition* part, PedCHSGeometry* bios_geom)
 	if (((C + 1) * heads + H) * sectors + S == A)
 		C++;
 
-	PED_ASSERT ((c * heads + h) * sectors + s == a, return 0);
-	PED_ASSERT ((C * heads + H) * sectors + S == A, return 0);
+	if (!((c * heads + h) * sectors + s == a))
+		return 0;
+	if (!((C * heads + H) * sectors + S == A))
+		return 0;
 
 	bios_geom->cylinders = cylinders;
 	bios_geom->heads = heads;
@@ -691,9 +808,9 @@ static void
 partition_probe_bios_geometry (const PedPartition* part,
                                PedCHSGeometry* bios_geom)
 {
-	PED_ASSERT (part != NULL, return);
-	PED_ASSERT (part->disk != NULL, return);
-	PED_ASSERT (bios_geom != NULL, return);
+	PED_ASSERT (part != NULL);
+	PED_ASSERT (part->disk != NULL);
+	PED_ASSERT (bios_geom != NULL);
 
 	if (ped_partition_is_active (part)) {
 		if (probe_partition_for_geom (part, bios_geom))
@@ -706,7 +823,7 @@ partition_probe_bios_geometry (const PedPartition* part,
 	if (part->type & PED_PARTITION_LOGICAL) {
 		PedPartition* ext_part;
 		ext_part = ped_disk_extended_partition (part->disk);
-		PED_ASSERT (ext_part != NULL, return);
+		PED_ASSERT (ext_part != NULL);
 		partition_probe_bios_geometry (ext_part, bios_geom);
 	} else {
 		*bios_geom = part->disk->dev->bios_geom;
@@ -751,10 +868,10 @@ disk_probe_bios_geometry (const PedDisk* disk, PedCHSGeometry* bios_geom)
 }
 #endif /* !DISCOVER_ONLY */
 
-static int
+static int _GL_ATTRIBUTE_PURE
 raw_part_is_extended (const DosRawPartition* raw_part)
 {
-	PED_ASSERT (raw_part != NULL, return 0);
+	PED_ASSERT (raw_part != NULL);
 
 	switch (raw_part->type) {
 	case PARTITION_DOS_EXT:
@@ -769,10 +886,10 @@ raw_part_is_extended (const DosRawPartition* raw_part)
 	return 0;
 }
 
-static int
+static int _GL_ATTRIBUTE_PURE
 raw_part_is_hidden (const DosRawPartition* raw_part)
 {
-	PED_ASSERT (raw_part != NULL, return 0);
+	PED_ASSERT (raw_part != NULL);
 
 	switch (raw_part->type) {
 	case PARTITION_FAT12_H:
@@ -791,10 +908,10 @@ raw_part_is_hidden (const DosRawPartition* raw_part)
 	return 0;
 }
 
-static int
+static int _GL_ATTRIBUTE_PURE
 raw_part_is_lba (const DosRawPartition* raw_part)
 {
-	PED_ASSERT (raw_part != NULL, return 0);
+	PED_ASSERT (raw_part != NULL);
 
 	switch (raw_part->type) {
 	case PARTITION_FAT32_LBA:
@@ -818,8 +935,8 @@ raw_part_parse (const PedDisk* disk, const DosRawPartition* raw_part,
 	PedPartition* part;
 	DosPartitionData* dos_data;
 
-	PED_ASSERT (disk != NULL, return NULL);
-	PED_ASSERT (raw_part != NULL, return NULL);
+	PED_ASSERT (disk != NULL);
+	PED_ASSERT (raw_part != NULL);
 
 	part = ped_partition_new (
 		disk, type, NULL,
@@ -840,6 +957,8 @@ raw_part_parse (const PedDisk* disk, const DosRawPartition* raw_part,
 	dos_data->lba = raw_part_is_lba (raw_part);
 	dos_data->palo = raw_part->type == PARTITION_PALO;
 	dos_data->prep = raw_part->type == PARTITION_PREP;
+	dos_data->irst = raw_part->type == PARTITION_IRST;
+	dos_data->esp = raw_part->type == PARTITION_ESP;
 	dos_data->orig = ped_malloc (sizeof (OrigState));
 	if (!dos_data->orig) {
 		ped_partition_destroy (part);
@@ -861,8 +980,8 @@ read_table (PedDisk* disk, PedSector sector, int is_extended_table)
 	PedPartitionType	type;
 	PedSector		lba_offset;
 
-	PED_ASSERT (disk != NULL, return 0);
-	PED_ASSERT (disk->dev != NULL, return 0);
+	PED_ASSERT (disk != NULL);
+	PED_ASSERT (disk->dev != NULL);
 
 	void *label = NULL;
 	if (!ptt_read_sector (disk->dev, sector, &label))
@@ -980,8 +1099,8 @@ error:
 static int
 msdos_read (PedDisk* disk)
 {
-	PED_ASSERT (disk != NULL, return 0);
-	PED_ASSERT (disk->dev != NULL, return 0);
+	PED_ASSERT (disk != NULL);
+	PED_ASSERT (disk->dev != NULL);
 
 	ped_disk_delete_all (disk);
 	if (!read_table (disk, 0, 0))
@@ -1016,8 +1135,8 @@ fill_raw_part (DosRawPartition* raw_part,
 	DosPartitionData*	dos_data;
 	PedCHSGeometry		bios_geom;
 
-	PED_ASSERT (raw_part != NULL, return 0);
-	PED_ASSERT (part != NULL, return 0);
+	PED_ASSERT (raw_part != NULL);
+	PED_ASSERT (part != NULL);
 
 	partition_probe_bios_geometry (part, &bios_geom);
 
@@ -1049,9 +1168,9 @@ fill_ext_raw_part_geom (DosRawPartition* raw_part,
                         const PedCHSGeometry* bios_geom,
 			const PedGeometry* geom, PedSector offset)
 {
-	PED_ASSERT (raw_part != NULL, return 0);
-	PED_ASSERT (geom != NULL, return 0);
-	PED_ASSERT (geom->dev != NULL, return 0);
+	PED_ASSERT (raw_part != NULL);
+	PED_ASSERT (geom != NULL);
+	PED_ASSERT (geom->dev != NULL);
 
 	raw_part->boot_ind = 0;
 	raw_part->type = PARTITION_DOS_EXT;
@@ -1072,9 +1191,9 @@ write_ext_table (const PedDisk* disk,
 	PedPartition*		part;
 	PedSector		lba_offset;
 
-	PED_ASSERT (disk != NULL, return 0);
-	PED_ASSERT (ped_disk_extended_partition (disk) != NULL, return 0);
-	PED_ASSERT (logical != NULL, return 0);
+	PED_ASSERT (disk != NULL);
+	PED_ASSERT (ped_disk_extended_partition (disk) != NULL);
+	PED_ASSERT (logical != NULL);
 
 	lba_offset = ped_disk_extended_partition (disk)->geom.start;
 
@@ -1120,7 +1239,7 @@ write_empty_table (const PedDisk* disk, PedSector sector)
 	DosRawTable		table;
 	void*			table_sector;
 
-	PED_ASSERT (disk != NULL, return 0);
+	PED_ASSERT (disk != NULL);
 
 	if (ptt_read_sector (disk->dev, sector, &table_sector)) {
 		memcpy (&table, table_sector, sizeof (table));
@@ -1141,7 +1260,7 @@ write_extended_partitions (const PedDisk* disk)
 	PedPartition*		part;
 	PedCHSGeometry		bios_geom;
 
-	PED_ASSERT (disk != NULL, return 0);
+	PED_ASSERT (disk != NULL);
 
 	ext_part = ped_disk_extended_partition (disk);
 	partition_probe_bios_geometry (ext_part, &bios_geom);
@@ -1152,24 +1271,14 @@ write_extended_partitions (const PedDisk* disk)
 		return write_empty_table (disk, ext_part->geom.start);
 }
 
-static inline uint32_t generate_random_id (void)
-{
-	struct timeval tv;
-	int rc;
-	rc = gettimeofday(&tv, NULL);
-	if (rc == -1)
-		return 0;
-	return (uint32_t)(tv.tv_usec & 0xFFFFFFFFUL);
-}
-
 static int
 msdos_write (const PedDisk* disk)
 {
 	PedPartition*		part;
 	int			i;
 
-	PED_ASSERT (disk != NULL, return 0);
-	PED_ASSERT (disk->dev != NULL, return 0);
+	PED_ASSERT (disk != NULL);
+	PED_ASSERT (disk->dev != NULL);
 
 	void *s0;
 	if (!ptt_read_sector (disk->dev, 0, &s0))
@@ -1183,7 +1292,7 @@ msdos_write (const PedDisk* disk)
 
 	/* If there is no unique identifier, generate a random one */
 	if (!table->mbr_signature)
-		table->mbr_signature = generate_random_id();
+		table->mbr_signature = generate_random_uint32 ();
 
 	memset (table->partitions, 0, sizeof (table->partitions));
 	table->magic = PED_CPU_TO_LE16 (MSDOS_MAGIC);
@@ -1242,6 +1351,8 @@ msdos_partition_new (const PedDisk* disk, PedPartitionType part_type,
 		dos_data->lba = 0;
 		dos_data->palo = 0;
 		dos_data->prep = 0;
+		dos_data->irst = 0;
+		dos_data->esp = 0;
 	} else {
 		part->disk_specific = NULL;
 	}
@@ -1277,6 +1388,8 @@ msdos_partition_duplicate (const PedPartition* part)
 	new_dos_data->lba = old_dos_data->lba;
 	new_dos_data->palo = old_dos_data->palo;
 	new_dos_data->prep = old_dos_data->prep;
+	new_dos_data->irst = old_dos_data->irst;
+	new_dos_data->esp = old_dos_data->esp;
 
 	if (old_dos_data->orig) {
 		new_dos_data->orig = ped_malloc (sizeof (OrigState));
@@ -1294,7 +1407,7 @@ msdos_partition_duplicate (const PedPartition* part)
 static void
 msdos_partition_destroy (PedPartition* part)
 {
-	PED_ASSERT (part != NULL, return);
+	PED_ASSERT (part != NULL);
 
 	if (ped_partition_is_active (part)) {
 		DosPartitionData* dos_data;
@@ -1325,6 +1438,8 @@ msdos_partition_set_system (PedPartition* part,
 		dos_data->lvm = 0;
 		dos_data->palo = 0;
 		dos_data->prep = 0;
+		dos_data->irst = 0;
+		dos_data->esp = 0;
 		if (dos_data->lba)
 			dos_data->system = PARTITION_EXT_LBA;
 		else
@@ -1355,6 +1470,14 @@ msdos_partition_set_system (PedPartition* part,
 	}
 	if (dos_data->prep) {
 		dos_data->system = PARTITION_PREP;
+		return 1;
+	}
+	if (dos_data->irst) {
+		dos_data->system = PARTITION_IRST;
+		return 1;
+	}
+	if (dos_data->esp) {
+		dos_data->system = PARTITION_ESP;
 		return 1;
 	}
 
@@ -1393,6 +1516,8 @@ clear_flags (DosPartitionData *dos_data)
   dos_data->lvm = 0;
   dos_data->palo = 0;
   dos_data->prep = 0;
+  dos_data->irst = 0;
+  dos_data->esp = 0;
   dos_data->raid = 0;
 }
 
@@ -1404,9 +1529,9 @@ msdos_partition_set_flag (PedPartition* part,
 	PedPartition*			walk;
 	DosPartitionData*		dos_data;
 
-	PED_ASSERT (part != NULL, return 0);
-	PED_ASSERT (part->disk_specific != NULL, return 0);
-	PED_ASSERT (part->disk != NULL, return 0);
+	PED_ASSERT (part != NULL);
+	PED_ASSERT (part->disk_specific != NULL);
+	PED_ASSERT (part->disk != NULL);
 
 	dos_data = part->disk_specific;
 	disk = part->disk;
@@ -1471,18 +1596,30 @@ msdos_partition_set_flag (PedPartition* part,
 		dos_data->prep = state;
 		return ped_partition_set_system (part, part->fs_type);
 
+	case PED_PARTITION_IRST:
+		if (state)
+			clear_flags (dos_data);
+		dos_data->irst = state;
+		return ped_partition_set_system (part, part->fs_type);
+
+	case PED_PARTITION_ESP:
+		if (state)
+			clear_flags (dos_data);
+		dos_data->esp = state;
+		return ped_partition_set_system (part, part->fs_type);
+
 	default:
 		return 0;
 	}
 }
 
-static int
+static int _GL_ATTRIBUTE_PURE
 msdos_partition_get_flag (const PedPartition* part, PedPartitionFlag flag)
 {
 	DosPartitionData*	dos_data;
 
-	PED_ASSERT (part != NULL, return 0);
-	PED_ASSERT (part->disk_specific != NULL, return 0);
+	PED_ASSERT (part != NULL);
+	PED_ASSERT (part->disk_specific != NULL);
 
 	dos_data = part->disk_specific;
 	switch (flag) {
@@ -1513,6 +1650,12 @@ msdos_partition_get_flag (const PedPartition* part, PedPartitionFlag flag)
 	case PED_PARTITION_PREP:
 		return dos_data->prep;
 
+	case PED_PARTITION_IRST:
+		return dos_data->irst;
+
+	case PED_PARTITION_ESP:
+		return dos_data->esp;
+
 	default:
 		return 0;
 	}
@@ -1535,6 +1678,8 @@ msdos_partition_is_flag_available (const PedPartition* part,
 	case PED_PARTITION_LBA:
 	case PED_PARTITION_PALO:
 	case PED_PARTITION_PREP:
+	case PED_PARTITION_IRST:
+	case PED_PARTITION_ESP:
 	case PED_PARTITION_DIAG:
 		return 1;
 
@@ -1638,13 +1783,13 @@ _primary_constraint (const PedDisk* disk, const PedCHSGeometry* bios_geom,
 			       		dev->length - min_geom->end))
 			return NULL;
 	} else {
-		/* Do not assume that length is larger than 1 cylinder's
-		   worth of sectors.  This is useful when testing with
-		   a memory-mapped "disk" (a la scsi_debug) that is say,
-		   2048 sectors long.  */
-		if (cylinder_size < dev->length
-		    && !ped_geometry_init (&start_geom, dev, cylinder_size,
-					   dev->length - cylinder_size))
+		/* Use cylinder_size as the starting sector number
+		   when the device is large enough to accommodate that.
+		   Otherwise, use sector 1.  */
+		PedSector start = (cylinder_size < dev->length
+				   ? cylinder_size : 1);
+		if (!ped_geometry_init (&start_geom, dev, start,
+					dev->length - start))
 			return NULL;
 		if (!ped_geometry_init (&end_geom, dev, 0, dev->length))
 			return NULL;
@@ -1725,7 +1870,7 @@ _logical_constraint (const PedDisk* disk, const PedCHSGeometry* bios_geom,
 	PedAlignment	end_align;
 	PedGeometry	max_geom;
 
-	PED_ASSERT (ext_part != NULL, return NULL);
+	PED_ASSERT (ext_part != NULL);
 
 	if (!ped_alignment_init (&start_align, start_offset, cylinder_size))
 		return NULL;
@@ -1874,7 +2019,7 @@ _log_meta_overlap_constraint (PedPartition* part, const PedGeometry* geom)
 	PedPartition*	walk;
 	int		not_5 = (part->num != 5);
 
-	PED_ASSERT (ext_part != NULL, return NULL);
+	PED_ASSERT (ext_part != NULL);
 
 	walk = ext_part->part_list;
 
@@ -1916,7 +2061,7 @@ _align_logical (PedPartition* part, const PedCHSGeometry* bios_geom,
 	PedGeometry*	solution = NULL;
 	PedConstraint   *intersect, *log_meta_overlap;
 
-	PED_ASSERT (ext_part != NULL, return 0);
+	PED_ASSERT (ext_part != NULL);
 
 	log_meta_overlap = _log_meta_overlap_constraint(part, &part->geom);
 	intersect = ped_constraint_intersect (constraint, log_meta_overlap);
@@ -2054,8 +2199,8 @@ msdos_partition_align (PedPartition* part, const PedConstraint* constraint)
 	PedCHSGeometry	bios_geom;
 	DosPartitionData* dos_data;
 
-	PED_ASSERT (part != NULL, return 0);
-	PED_ASSERT (part->disk_specific != NULL, return 0);
+	PED_ASSERT (part != NULL);
+	PED_ASSERT (part->disk_specific != NULL);
 
 	dos_data = part->disk_specific;
 
@@ -2100,7 +2245,7 @@ add_metadata_part (PedDisk* disk, PedPartitionType type, PedSector start,
 {
 	PedPartition*		new_part;
 
-	PED_ASSERT (disk != NULL, return 0);
+	PED_ASSERT (disk != NULL);
 
 	new_part = ped_partition_new (disk, type | PED_PARTITION_METADATA, NULL,
 				      start, end);
@@ -2157,7 +2302,7 @@ add_logical_part_metadata (PedDisk* disk, const PedPartition* log_part)
 	if (log_part->num == 5 && metadata_length < bios_geom.sectors)
 		return 1;
 
-	PED_ASSERT (metadata_length > 0, return 0);
+	PED_ASSERT (metadata_length > 0);
 
 	return add_metadata_part (disk, PED_PARTITION_LOGICAL,
 				  metadata_start, metadata_end);
@@ -2271,8 +2416,8 @@ msdos_alloc_metadata (PedDisk* disk)
 {
 	PedPartition*		ext_part;
 
-	PED_ASSERT (disk != NULL, return 0);
-	PED_ASSERT (disk->dev != NULL, return 0);
+	PED_ASSERT (disk != NULL);
+	PED_ASSERT (disk->dev != NULL);
 
 	if (!add_startend_metadata (disk))
 		return 0;
@@ -2314,24 +2459,29 @@ next_primary (const PedDisk* disk)
 		if (!ped_disk_get_partition (disk, i))
 			return i;
 	}
-	return 0;
+	return -1;
 }
 
-static int
+static int _GL_ATTRIBUTE_PURE
 next_logical (const PedDisk* disk)
 {
 	int	i;
-	for (i=5; 1; i++) {
+	for (i=5; i<=MAX_TOTAL_PART; i++) {
 		if (!ped_disk_get_partition (disk, i))
 			return i;
 	}
+	ped_exception_throw (
+		PED_EXCEPTION_ERROR, PED_EXCEPTION_CANCEL,
+		_("cannot create any more partitions"),
+		disk->dev->path);
+	return -1;
 }
 
 static int
 msdos_partition_enumerate (PedPartition* part)
 {
-	PED_ASSERT (part != NULL, return 0);
-	PED_ASSERT (part->disk != NULL, return 0);
+	PED_ASSERT (part != NULL);
+	PED_ASSERT (part->disk != NULL);
 
 	/* don't re-number a primary partition */
 	if (part->num != -1 && part->num <= DOS_N_PRI_PARTITIONS)
@@ -2343,7 +2493,8 @@ msdos_partition_enumerate (PedPartition* part)
 		part->num = next_logical (part->disk);
 	else
 		part->num = next_primary (part->disk);
-
+	if (part->num == -1)
+		return 0;
 	return 1;
 }
 
@@ -2387,8 +2538,8 @@ static PedDiskType msdos_disk_type = {
 void
 ped_disk_msdos_init ()
 {
-	PED_ASSERT (sizeof (DosRawPartition) == 16, return);
-	PED_ASSERT (sizeof (DosRawTable) == 512, return);
+	PED_ASSERT (sizeof (DosRawPartition) == 16);
+	PED_ASSERT (sizeof (DosRawTable) == 512);
 
 	ped_disk_type_register (&msdos_disk_type);
 }

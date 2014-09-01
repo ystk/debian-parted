@@ -1,6 +1,6 @@
 /*
     libparted - a library for manipulating disk partitions
-    Copyright (C) 2000, 2007, 2009-2010 Free Software Foundation, Inc.
+    Copyright (C) 2000, 2007, 2009-2014 Free Software Foundation, Inc.
 
     This program is free software; you can redistribute it and/or modify
     it under the terms of the GNU General Public License as published by
@@ -30,60 +30,32 @@
 
 #include <unistd.h>
 
-#define NTFS_BLOCK_SIZES       ((int[2]){512, 0})
-
 #define NTFS_SIGNATURE	"NTFS"
 
-static PedGeometry*
+PedGeometry*
 ntfs_probe (PedGeometry* geom)
 {
-	char	buf[512];
+	char	*buf = alloca (geom->dev->sector_size);
+	PedGeometry *newg = NULL;
 
-	if (!ped_geometry_read (geom, buf, 0, 1))
+	if (!ped_geometry_read(geom, buf, 0, 1))
 		return 0;
 
 	if (strncmp (NTFS_SIGNATURE, buf + 3, strlen (NTFS_SIGNATURE)) == 0)
-		return ped_geometry_new (geom->dev, geom->start,
+		newg = ped_geometry_new (geom->dev, geom->start,
 					 PED_LE64_TO_CPU (*(uint64_t*)
 						 	  (buf + 0x28)));
-	else
-		return NULL;
+	return newg;
 }
-
-#ifndef DISCOVER_ONLY
-static int
-ntfs_clobber (PedGeometry* geom)
-{
-	char	buf[512];
-
-	memset (buf, 0, 512);
-	return ped_geometry_write (geom, buf, 0, 1);
-}
-#endif /* !DISCOVER_ONLY */
 
 static PedFileSystemOps ntfs_ops = {
 	probe:		ntfs_probe,
-#ifndef DISCOVER_ONLY
-	clobber:	ntfs_clobber,
-#else
-	clobber:	NULL,
-#endif
-	open:		NULL,
-	create:		NULL,
-	close:		NULL,
-	check:		NULL,
-	copy:		NULL,
-	resize:		NULL,
-	get_create_constraint:	NULL,
-	get_resize_constraint:	NULL,
-	get_copy_constraint:	NULL
 };
 
 static PedFileSystemType ntfs_type = {
 	next:	NULL,
 	ops:	&ntfs_ops,
 	name:	"ntfs",
-	block_sizes: NTFS_BLOCK_SIZES
 };
 
 void

@@ -1,6 +1,6 @@
 /*
     partprobe - informs the OS kernel of partition layout
-    Copyright (C) 2001-2002, 2007-2010 Free Software Foundation, Inc.
+    Copyright (C) 2001-2002, 2007-2014 Free Software Foundation, Inc.
 
     This program is free software; you can redistribute it and/or modify
     it under the terms of the GNU General Public License as published by
@@ -57,9 +57,6 @@
 
 static struct option const long_options[] =
   {
-    /* Note: the --no-update option is deprecated, and deliberately
-     * not documented.  FIXME: remove --no-update in 2009. */
-    {"no-update", no_argument, NULL, 'd'},
     {"dry-run", no_argument, NULL, 'd'},
     {"summary", no_argument, NULL, 's'},
     {"help", no_argument, NULL, 'h'},
@@ -109,12 +106,21 @@ process_dev (PedDevice* dev)
 	PedDisk*	disk;
 
 	disk_type = ped_disk_probe (dev);
-	if (!disk_type || !strcmp (disk_type->name, "loop"))
-		return 1;
+	if (!disk_type) {
+		/* Partition table not found, so create dummy,
+		   empty one */
+		disk_type = ped_disk_type_get("msdos");
+		if (!disk_type)
+			goto error;
 
-	disk = ped_disk_new (dev);
-	if (!disk)
-		goto error;
+		disk = ped_disk_new_fresh (dev, disk_type);
+		if (!disk)
+			goto error_destroy_disk;
+	} else {
+		disk = ped_disk_new (dev);
+		if (!disk)
+			goto error;
+	}
 	if (!opt_no_inform) {
 		if (!ped_disk_commit_to_os (disk))
 			goto error_destroy_disk;

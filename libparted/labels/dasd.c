@@ -1,7 +1,7 @@
 /* -*- Mode: c; tab-width: 8; indent-tabs-mode: nil; c-basic-offset: 8 -*-
 
     libparted - a library for manipulating disk partitions
-    Copyright (C) 2000-2001, 2007-2010 Free Software Foundation, Inc.
+    Copyright (C) 2000-2001, 2007-2014 Free Software Foundation, Inc.
 
     This program is free software; you can redistribute it and/or modify
     it under the terms of the GNU General Public License as published by
@@ -71,6 +71,7 @@ typedef struct {
 
 typedef struct {
 	unsigned int format_type;
+	unsigned int label_block;
 	volume_label_t vlabel;
 } DasdDiskSpecific;
 
@@ -136,7 +137,7 @@ dasd_alloc (const PedDevice* dev)
 	DasdDiskSpecific *disk_specific;
 	char volser[7];
 
-	PED_ASSERT (dev != NULL, return NULL);
+	PED_ASSERT (dev != NULL);
 
 	arch_specific = LINUX_SPECIFIC (dev);
 	disk = _ped_disk_alloc (dev, &dasd_disk_type);
@@ -151,6 +152,7 @@ dasd_alloc (const PedDevice* dev)
 
 	/* CDL format, newer */
 	disk_specific->format_type = 2;
+	disk_specific->label_block = 2;
 
 	/* Setup volume label (for fresh disks) */
 	snprintf(volser, sizeof(volser), "0X%04X", arch_specific->devno);
@@ -183,7 +185,7 @@ dasd_duplicate (const PedDisk* disk)
 static void
 dasd_free (PedDisk* disk)
 {
-	PED_ASSERT(disk != NULL, return);
+	PED_ASSERT(disk != NULL);
 	/* Don't free disk->disk_specific first, in case _ped_disk_free
 	   or one of its eventual callees ever accesses it.  */
 	void *p = disk->disk_specific;
@@ -210,7 +212,7 @@ dasd_probe (const PedDevice *dev)
 	LinuxSpecific* arch_specific;
 	struct fdasd_anchor anchor;
 
-	PED_ASSERT(dev != NULL, return 0);
+	PED_ASSERT(dev != NULL);
 
 	if (!(dev->type == PED_DEVICE_DASD
               || dev->type == PED_DEVICE_VIODASD
@@ -226,7 +228,9 @@ dasd_probe (const PedDevice *dev)
 
 	fdasd_check_api_version(&anchor, arch_specific->fd);
 
-	if (fdasd_check_volume(&anchor, arch_specific->fd))
+	/* Labels are required on CDL formatted DASDs. */
+	if (fdasd_check_volume(&anchor, arch_specific->fd) &&
+	    anchor.FBA_layout == 0)
 		goto error_cleanup;
 
 	fdasd_cleanup(&anchor);
@@ -258,9 +262,9 @@ dasd_read (PedDisk* disk)
 
 	PDEBUG;
 
-	PED_ASSERT (disk != NULL, return 0);
+	PED_ASSERT (disk != NULL);
 	PDEBUG;
-	PED_ASSERT (disk->dev != NULL, return 0);
+	PED_ASSERT (disk->dev != NULL);
 	PDEBUG;
 
 	dev = disk->dev;
@@ -273,32 +277,118 @@ dasd_read (PedDisk* disk)
 	fdasd_initialize_anchor(&anchor);
 
 	fdasd_get_geometry(disk->dev, &anchor, arch_specific->fd);
-
-	/* check dasd for labels and vtoc */
-	if (fdasd_check_volume(&anchor, arch_specific->fd))
-		goto error_close_dev;
-
-	/* Save volume label (read by fdasd_check_volume) for writing */
-	memcpy(&disk_specific->vlabel, anchor.vlabel, sizeof(volume_label_t));
+	disk_specific->label_block = anchor.label_block;
 
 	if ((anchor.geo.cylinders * anchor.geo.heads) > BIG_DISK_SIZE)
 		anchor.big_disk++;
 
-	ped_disk_delete_all (disk);
-
-	if (strncmp(anchor.vlabel->volkey,
-				vtoc_ebcdic_enc ("LNX1", str, 4), 4) == 0) {
+	/* check dasd for labels and vtoc */
+	if (fdasd_check_volume(&anchor, arch_specific->fd)) {
 		DasdPartitionData* dasd_data;
 
-		/* LDL format, old one */
+		/* Kernel partitioning code will report 'implicit' partitions
+		 * for non-CDL format DASDs even when there is no
+		 * label/VTOC.  */
+		if (anchor.FBA_layout == 0)
+			goto error_close_dev;
+
 		disk_specific->format_type = 1;
-		start = 24;
-		end = (long long)(long long) anchor.geo.cylinders
-		      * (long long)anchor.geo.heads
-		      * (long long)disk->dev->hw_geom.sectors
-		      * (long long)arch_specific->real_sector_size
-		      / (long long)disk->dev->sector_size - 1;
-		part = ped_partition_new (disk, PED_PARTITION_PROTECTED, NULL, start, end);
+
+		/* Register implicit partition */
+		ped_disk_delete_all (disk);
+
+		start = (PedSector) arch_specific->real_sector_size /
+			(PedSector) disk->dev->sector_size *
+			(PedSector) (anchor.label_block + 1);
+		end = disk->dev->length - 1;
+		part = ped_partition_new (disk, PED_PARTITION_NORMAL, NULL,
+					  start, end);
+		if (!part)
+			goto error_close_dev;
+
+		part->num = 1;
+		part->fs_type = ped_file_system_probe (&part->geom);
+		dasd_data = part->disk_specific;
+		dasd_data->raid = 0;
+		dasd_data->lvm = 0;
+		dasd_data->type = 0;
+
+		if (!ped_disk_add_partition (disk, part, NULL))
+			goto error_close_dev;
+
+		fdasd_cleanup(&anchor);
+
+		return 1;
+	}
+
+	/* Save volume label (read by fdasd_check_volume) for writing */
+	memcpy(&disk_specific->vlabel, anchor.vlabel, sizeof(volume_label_t));
+
+	ped_disk_delete_all (disk);
+
+	bool is_ldl = strncmp(anchor.vlabel->volkey,
+			 vtoc_ebcdic_enc("LNX1", str, 4), 4) == 0;
+	bool is_cms = strncmp(anchor.vlabel->volkey,
+			 vtoc_ebcdic_enc("CMS1", str, 4), 4) == 0;
+	if (is_ldl || is_cms) {
+		DasdPartitionData* dasd_data;
+
+		union vollabel {
+			volume_label_t unused;
+			ldl_volume_label_t ldl;
+			cms_volume_label_t cms;
+		};
+		union vollabel *cms_ptr1 = (union vollabel *) anchor.vlabel;
+		cms_volume_label_t *cms_ptr = &cms_ptr1->cms;
+		ldl_volume_label_t *ldl_ptr = &cms_ptr1->ldl;
+		int partition_start_block;
+
+		disk_specific->format_type = 1;
+
+		if (is_cms && cms_ptr->usable_count >= cms_ptr->block_count)
+			partition_start_block = 2;   /* FBA DASD */
+		else
+			partition_start_block = 3;   /* CKD DASD */
+
+		if (is_ldl)
+			start = (long long) arch_specific->real_sector_size
+				/ (long long) disk->dev->sector_size
+				* (long long) partition_start_block;
+		else if (cms_ptr->disk_offset == 0)
+			start = (long long) cms_ptr->block_size
+				/ (long long) disk->dev->sector_size
+				* (long long) partition_start_block;
+		else
+			start = (long long) cms_ptr->block_size
+				/ (long long) disk->dev->sector_size
+				* (long long) cms_ptr->disk_offset;
+
+		if (is_ldl)
+		   if (strncmp(ldl_ptr->ldl_version,
+			       vtoc_ebcdic_enc("2", str, 1), 1) >= 0)
+		      end = (long long) arch_specific->real_sector_size
+			    / (long long) disk->dev->sector_size
+			    * (long long) ldl_ptr->formatted_blocks - 1;
+		   else
+		      end = disk->dev->length - 1;
+		else
+		   if (cms_ptr->disk_offset == 0)
+		      end = (long long) cms_ptr->block_size
+			    / (long long) disk->dev->sector_size
+			    * (long long) cms_ptr->block_count - 1;
+		   else
+		      /*
+			 Frankly, I do not understand why the last block
+			 of the CMS reserved file is not included in the
+			 partition; but this is the algorithm used by the
+			 Linux kernel.  See fs/partitions/ibm.c in the
+			 Linux kernel source code.
+		      */
+		      end = (long long) cms_ptr->block_size
+			    / (long long) disk->dev->sector_size
+			    * (long long) (cms_ptr->block_count - 1) - 1;
+
+		part = ped_partition_new (disk, PED_PARTITION_NORMAL, NULL, start, end);
 		if (!part)
 			goto error_close_dev;
 
@@ -526,21 +616,22 @@ dasd_write (const PedDisk* disk)
 	struct fdasd_anchor anchor;
 	partition_info_t *part_info[USABLE_PARTITIONS];
 
-	PED_ASSERT(disk != NULL, return 0);
-	PED_ASSERT(disk->dev != NULL, return 0);
+	PED_ASSERT(disk != NULL);
+	PED_ASSERT(disk->dev != NULL);
 
 	arch_specific = LINUX_SPECIFIC (disk->dev);
 	disk_specific = disk->disk_specific;
 
 	PDEBUG;
 
-	/* If formated in LDL, don't write anything. */
+	/* If not formated in CDL, don't write anything. */
 	if (disk_specific->format_type == 1)
 		return 1;
 
 	/* initialize the anchor */
 	fdasd_initialize_anchor(&anchor);
 	fdasd_get_geometry(disk->dev, &anchor, arch_specific->fd);
+	fdasd_check_volume(&anchor, arch_specific->fd);
 	memcpy(anchor.vlabel, &disk_specific->vlabel, sizeof(volume_label_t));
 	anchor.vlabel_changed++;
 
@@ -608,7 +699,7 @@ dasd_partition_new (const PedDisk* disk, PedPartitionType part_type,
 	if (!part)
 		goto error;
 
-	part->disk_specific = ped_malloc (sizeof (DasdPartitionData));
+	part->disk_specific = ped_calloc (sizeof (DasdPartitionData));
 	return part;
 
 error:
@@ -635,7 +726,7 @@ dasd_partition_duplicate (const PedPartition *part)
 static void
 dasd_partition_destroy (PedPartition* part)
 {
-	PED_ASSERT(part != NULL, return);
+	PED_ASSERT(part != NULL);
 
 	if (ped_partition_is_active(part))
 		free(part->disk_specific);
@@ -647,8 +738,8 @@ dasd_partition_set_flag (PedPartition* part, PedPartitionFlag flag, int state)
 {
 	DasdPartitionData* dasd_data;
 
-	PED_ASSERT(part != NULL, return 0);
-	PED_ASSERT(part->disk_specific != NULL, return 0);
+	PED_ASSERT(part != NULL);
+	PED_ASSERT(part->disk_specific != NULL);
 	dasd_data = part->disk_specific;
 
 	switch (flag) {
@@ -672,8 +763,8 @@ dasd_partition_get_flag (const PedPartition* part, PedPartitionFlag flag)
 {
 	DasdPartitionData* dasd_data;
 
-	PED_ASSERT (part != NULL, return 0);
-	PED_ASSERT (part->disk_specific != NULL, return 0);
+	PED_ASSERT (part != NULL);
+	PED_ASSERT (part->disk_specific != NULL);
 	dasd_data = part->disk_specific;
 
 	switch (flag) {
@@ -765,7 +856,7 @@ dasd_partition_align (PedPartition* part, const PedConstraint* constraint)
 {
 	DasdDiskSpecific* disk_specific;
 
-	PED_ASSERT (part != NULL, return 0);
+	PED_ASSERT (part != NULL);
 
 	disk_specific = part->disk->disk_specific;
 	/* If formated in LDL, ignore metadata partition */
@@ -856,18 +947,30 @@ dasd_alloc_metadata (PedDisk* disk)
 	PedSector vtoc_end;
 	LinuxSpecific* arch_specific;
 	DasdDiskSpecific* disk_specific;
+	PedPartition* part = NULL; /* initialize solely to placate gcc */
+	PedPartition* new_part2;
+	PedSector trailing_meta_start, trailing_meta_end;
+	struct fdasd_anchor anchor;
 
-	PED_ASSERT (disk != NULL, goto error);
-	PED_ASSERT (disk->dev != NULL, goto error);
+	PED_ASSERT (disk != NULL);
+	PED_ASSERT (disk->dev != NULL);
 
 	arch_specific = LINUX_SPECIFIC (disk->dev);
 	disk_specific = disk->disk_specific;
 
 	constraint_any = ped_constraint_any (disk->dev);
 
-	/* If formated in LDL, the real partition starts at sector 24. */
-	if (disk_specific->format_type == 1)
-		vtoc_end = 23;
+	/* For LDL or CMS, the leading metadata ends at the sector before
+	   the start of the first partition */
+	if (disk_specific->format_type == 1) {
+	        part = ped_disk_get_partition(disk, 1);
+		if (part)
+			vtoc_end = part->geom.start - 1;
+		else
+			vtoc_end = (PedSector) arch_specific->real_sector_size /
+				   (PedSector) disk->dev->sector_size *
+				   (PedSector) disk_specific->label_block;
+	}
 	else {
                 if (disk->dev->type == PED_DEVICE_FILE)
                         arch_specific->real_sector_size = disk->dev->sector_size;
@@ -884,6 +987,37 @@ dasd_alloc_metadata (PedDisk* disk)
 	if (!ped_disk_add_partition (disk, new_part, constraint_any)) {
 		ped_partition_destroy (new_part);
 		goto error;
+	}
+
+	if (disk_specific->format_type == 1 && part) {
+	   /*
+	      For LDL or CMS there may be trailing metadata as well.
+	      For example: the last block of a CMS reserved file,
+	      the "recomp" area of a CMS minidisk that has been
+	      formatted and then formatted again with the RECOMP
+	      option specifying fewer than the maximum number of
+	      cylinders, a disk that was formatted at one size,
+	      backed up, then restored to a larger size disk, etc.
+	   */
+	   trailing_meta_start = part->geom.end + 1;
+	   fdasd_initialize_anchor(&anchor);
+	   fdasd_get_geometry(disk->dev, &anchor, arch_specific->fd);
+	   trailing_meta_end = (long long) disk->dev->length - 1;
+	   fdasd_cleanup(&anchor);
+	   if (trailing_meta_end >= trailing_meta_start) {
+		new_part2 = ped_partition_new (disk,PED_PARTITION_METADATA,
+		   NULL, trailing_meta_start, trailing_meta_end);
+		if (!new_part2) {
+		   ped_partition_destroy (new_part);
+		   goto error;
+		}
+		if (!ped_disk_add_partition (disk, new_part2,
+		   constraint_any)) {
+		   ped_partition_destroy (new_part2);
+		   ped_partition_destroy (new_part);
+		   goto error;
+		}
+	   }
 	}
 
 	ped_constraint_destroy (constraint_any);

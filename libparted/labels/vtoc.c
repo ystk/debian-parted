@@ -150,7 +150,7 @@ enum failure {
 	unable_to_read
 };
 
-static char buffer[85];
+static char buffer[89];
 
 static void
 vtoc_error (enum failure why, char const *s1, char const *s2)
@@ -218,11 +218,32 @@ vtoc_set_extent (extent_t *ext, u_int8_t typeind, u_int8_t seqno,
 }
 
 void
-vtoc_set_cchh (cchh_t *addr, u_int16_t cc, u_int16_t hh)
+vtoc_set_cchh (cchh_t *addr, u_int32_t cc, u_int16_t hh)
 {
 	PDEBUG
-	addr->cc = cc;
-	addr->hh = hh;
+	addr->cc = (u_int16_t) cc;
+	addr->hh = cc >> 16;
+	addr->hh <<= 4;
+	addr->hh |= hh;
+}
+
+u_int32_t
+vtoc_get_cyl_from_cchh (cchh_t *addr)
+{
+	u_int32_t cyl;
+
+	/*decode cylinder for large volumes */
+	cyl = addr->hh & 0xFFF0;
+	cyl <<= 12;
+	cyl |= addr->cc;
+	return cyl;
+}
+
+u_int16_t
+vtoc_get_head_from_cchh (cchh_t *addr)
+{
+	/* decode heads for large volumes */
+	return addr->hh & 0x000F;
 }
 
 static void
@@ -234,12 +255,63 @@ vtoc_set_ttr (ttr_t *addr, u_int16_t tt, u_int8_t r)
 }
 
 void
-vtoc_set_cchhb (cchhb_t *addr, u_int16_t cc, u_int16_t hh, u_int8_t b)
+vtoc_set_cchhb (cchhb_t *addr, u_int32_t cc, u_int16_t hh, u_int8_t b)
 {
 	PDEBUG
-	addr->cc = cc;
-	addr->hh = hh;
-	addr->b = b;
+	addr->cc = (u_int16_t) cc;
+	addr->hh = cc >> 16;
+	addr->hh <<= 4;
+	addr->hh |= hh;
+	addr->b  = b;
+}
+
+u_int32_t
+vtoc_get_cyl_from_cchhb(cchhb_t *addr)
+{
+	u_int32_t cyl;
+
+	/* decode cylinder for large volumes */
+	cyl = addr->hh & 0xFFF0;
+	cyl <<= 12;
+	cyl |= addr->cc;
+	return cyl;
+}
+
+u_int16_t
+vtoc_get_head_from_cchhb(cchhb_t *addr)
+{
+	/* decode heads for large volumes */
+	return addr->hh & 0x000F;
+}
+
+/*
+ * some functions to convert cyl-cyl-head-head addresses to
+ * block or track numbers
+ * Note: Record zero is special, so first block on a track is
+ * in record 1!
+ */
+u_int64_t
+cchhb2blk (cchhb_t *p, struct fdasd_hd_geometry *geo)
+{
+	return (u_int64_t) vtoc_get_cyl_from_cchhb(p) *
+		geo->heads * geo->sectors +
+		vtoc_get_head_from_cchhb(p) * geo->sectors +
+		p->b;
+}
+
+u_int64_t
+cchh2blk (cchh_t *p, struct fdasd_hd_geometry *geo)
+{
+	return (u_int64_t) vtoc_get_cyl_from_cchh(p) *
+		geo->heads * geo->sectors +
+		vtoc_get_head_from_cchh(p) * geo->sectors;
+}
+
+u_int32_t
+cchh2trk (cchh_t *p, struct fdasd_hd_geometry *geo)
+{
+	return  vtoc_get_cyl_from_cchh(p) * geo->heads +
+		vtoc_get_head_from_cchh(p);
 }
 
 void
@@ -257,7 +329,7 @@ void
 vtoc_volume_label_init (volume_label_t *vlabel)
 {
 	PDEBUG
-	sprintf(buffer, "%84s", " ");
+	sprintf(buffer, "%88s", " ");
 	vtoc_ebcdic_enc(buffer, buffer, sizeof *vlabel);
 	memcpy(vlabel, buffer, sizeof *vlabel);
 }
@@ -269,6 +341,28 @@ int
 vtoc_read_volume_label (int f, unsigned long vlabel_start,
                         volume_label_t *vlabel)
 {
+
+	char str[5];
+	unsigned long block_zero;
+	typedef struct bogus_label bogus_label_t;
+	typedef union vollabel vollabel_t;
+
+	union __attribute__((packed)) vollabel {
+		volume_label_t cdl;
+		ldl_volume_label_t ldl;
+		cms_volume_label_t cms;
+	};
+
+	struct  __attribute__((packed)) bogus_label {
+	   char overhead[512];
+	   vollabel_t actual_label;
+	};
+
+	bogus_label_t mybogus;
+	bogus_label_t *bogus_ptr = &mybogus;
+	vollabel_t *union_ptr = &bogus_ptr->actual_label;
+	volume_label_t *cdl_ptr = &union_ptr->cdl;
+
 	PDEBUG
 	int rc;
 
@@ -279,12 +373,43 @@ vtoc_read_volume_label (int f, unsigned long vlabel_start,
 	}
 
 	rc = read(f, vlabel, sizeof(volume_label_t));
-	if (rc != sizeof(volume_label_t)) {
+	if (rc != sizeof(volume_label_t) &&
+	/* For CDL we ask to read 88 bytes, but only get 84 */
+            rc != sizeof(volume_label_t) - 4) {
 		vtoc_error(unable_to_read, "vtoc_read_volume_label",
 			   _("Could not read volume label."));
 		return 1;
 	}
 
+	if (strncmp(vlabel->volkey, vtoc_ebcdic_enc("VOL1", str, 4), 4) == 0
+	 || strncmp(vlabel->volkey, vtoc_ebcdic_enc("LNX1", str, 4), 4) == 0
+         || strncmp(vlabel->volkey, vtoc_ebcdic_enc("CMS1", str, 4), 4) == 0)
+	return 0;
+
+	/*
+	   If we didn't find a valid volume label, there is a special case
+           we must try before we give up.  For a CMS-formatted disk on FBA
+	   DASD using the DIAG driver and a block size greater than 512, we
+	   must read the block at offset 0, then look for a label within
+	   that block at offset 512.
+	*/
+
+	block_zero = 0;
+
+	if (lseek(f, block_zero, SEEK_SET) == -1) {
+		vtoc_error(unable_to_seek, "vtoc_read_volume_label",
+			   _("Could not read volume label."));
+		return 1;
+	}
+
+	rc = read(f, bogus_ptr, sizeof(bogus_label_t));
+	if (rc != sizeof(bogus_label_t)) {
+		vtoc_error(unable_to_read, "vtoc_read_volume_label",
+			   _("Could not read volume label."));
+		return 1;
+	}
+
+	memcpy(vlabel, cdl_ptr, sizeof *vlabel);
 	return 0;
 }
 
@@ -302,8 +427,10 @@ vtoc_write_volume_label (int f, unsigned long vlabel_start,
 		vtoc_error(unable_to_seek, "vtoc_write_volume_label",
 			   _("Could not write volume label."));
 
-	rc = write(f, vlabel, sizeof(volume_label_t));
-	if (rc != sizeof(volume_label_t))
+	rc = write(f, vlabel, sizeof(volume_label_t) - 4);
+	/* Subtract 4 to leave off the "fudge" variable when writing.
+           We only write CDL volume labels, never LDL or CMS.  */
+	if (rc != sizeof(volume_label_t) - 4)
 		vtoc_error(unable_to_write, "vtoc_write_volume_label",
 			   _("Could not write volume label."));
 
@@ -451,7 +578,8 @@ vtoc_write_label (int f, unsigned long position,
 		  format1_label_t const *f1,
                   format4_label_t const *f4,
 		  format5_label_t const *f5,
-		  format7_label_t const *f7)
+		  format7_label_t const *f7,
+		  format9_label_t const *f9)
 {
 	PDEBUG
 	int t;
@@ -487,6 +615,17 @@ vtoc_write_label (int f, unsigned long position,
 			vtoc_error(unable_to_write, "vtoc_write_label",
 				   _("Could not write VTOC FMT7 DSCB."));
 	}
+
+	if (f9 != NULL)
+	{
+		t = sizeof(format9_label_t);
+		if (write(f, f9, t) != t)
+		{
+			close(f);
+			vtoc_error(unable_to_write, "vtoc_write_label",
+				   _("Could not write VTOC FMT9 DSCB."));
+		}
+	}
 }
 
 /*
@@ -494,7 +633,8 @@ vtoc_write_label (int f, unsigned long position,
  */
 void
 vtoc_init_format4_label (format4_label_t *f4, unsigned int usable_partitions,
-                         unsigned int cylinders, unsigned int tracks,
+                         unsigned int compat_cylinders,
+                         unsigned int real_cylinders, unsigned int tracks,
                          unsigned int blocks, unsigned int blksize,
                          u_int16_t dev_type)
 {
@@ -519,7 +659,7 @@ vtoc_init_format4_label (format4_label_t *f4, unsigned int usable_partitions,
 	f4->DS4DEVAC = 0x00;
 
 	/* -- begin f4->DS4DEVCT -- */
-	f4->DS4DEVCT.DS4DSCYL = cylinders;
+	f4->DS4DEVCT.DS4DSCYL = compat_cylinders;
 	f4->DS4DEVCT.DS4DSTRK = tracks;
 
 	switch (dev_type) {
@@ -558,7 +698,11 @@ vtoc_init_format4_label (format4_label_t *f4, unsigned int usable_partitions,
 	bzero(f4->res2, sizeof(f4->res2));
 	f4->DS4EFLVL = 0x00;
 	bzero(&f4->DS4EFPTR, sizeof(f4->DS4EFPTR));
-	bzero(f4->res3, sizeof(f4->res3));
+	bzero(&f4->res3, sizeof(f4->res3));
+	f4->DS4DCYL = real_cylinders;
+	bzero(f4->res4, sizeof(f4->res4));
+	f4->DS4DEVF2 = 0x40; /* allow format 8 and 9 labels */
+	bzero(&f4->res5, sizeof(f4->res5));
 }
 
 /*
@@ -592,11 +736,12 @@ vtoc_init_format7_label (format7_label_t *f7)
 }
 
 /*
- * initializes a format1 label
+ * helper function that initializes a most parts of a
+ * format1 or format 8 label, all but the field DS1FMTID
  */
 void
-vtoc_init_format1_label (char *volid, unsigned int blksize,
-                         extent_t *part_extent, format1_label_t *f1)
+vtoc_init_format_1_8_label (char *volid, unsigned int blksize,
+                            extent_t *part_extent, format1_label_t *f1)
 {
 	PDEBUG
 	struct tm * creatime;
@@ -611,7 +756,6 @@ vtoc_init_format1_label (char *volid, unsigned int blksize,
 	sprintf(str, "PART    .NEW                                ");
 	vtoc_ebcdic_enc(str, str, 44);
 	strncpy(f1->DS1DSNAM, str, 44);
-	f1->DS1FMTID = 0xf1;
 	strncpy(f1->DS1DSSN, "      ", 6);
 	f1->DS1VOLSQ = 0x0001;
 
@@ -647,6 +791,37 @@ vtoc_init_format1_label (char *volid, unsigned int blksize,
 	bzero(&f1->DS1EXT2, sizeof(extent_t));
 	bzero(&f1->DS1EXT3, sizeof(extent_t));
 	vtoc_set_cchhb(&f1->DS1PTRDS, 0x0000, 0x0000, 0x00);
+}
+
+void
+vtoc_init_format1_label (char *volid, unsigned int blksize,
+                         extent_t *part_extent, format1_label_t *f1)
+{
+	vtoc_init_format_1_8_label(volid, blksize, part_extent, f1);
+	f1->DS1FMTID = 0xf1;
+}
+
+void
+vtoc_init_format8_label (char *volid, unsigned int blksize,
+                         extent_t *part_extent, format1_label_t *f8)
+{
+	vtoc_init_format_1_8_label(volid, blksize, part_extent, f8);
+	f8->DS1FMTID = 0xf8;
+}
+
+void
+vtoc_update_format8_label (cchhb_t *associated_f9, format1_label_t *f8)
+{
+	memcpy(&f8->DS1PTRDS, associated_f9, sizeof(*associated_f9));
+}
+
+void
+vtoc_init_format9_label (format9_label_t *f9)
+{
+	f9->DS9KEYID = 0x09;
+	f9->DS9SUBTY = 0x01;
+	f9->DS9NUMF9 = 1;
+	f9->DS9FMTID = 0xf9;
 }
 
 /*
@@ -1005,7 +1180,7 @@ vtoc_update_format7_label_add (format7_label_t *f7, int verbose,
 		if ((ext->a + ext->b) == 0x00000000)
 			continue;
 
-		if ((ext->b + 1) == tmp->a) {
+		if (ext->b == tmp->a) {
 			/* this extent precedes the new one */
 			ext->b = tmp->b;
 			bzero(tmp, sizeof(ds7ext_t));
@@ -1019,7 +1194,7 @@ vtoc_update_format7_label_add (format7_label_t *f7, int verbose,
 			continue;
 		}
 
-		if (ext->a == (tmp->b + 1)) {
+		if (ext->a == tmp->b) {
 			/* this extent succeeds the new one */
 			ext->a = tmp->a;
 			bzero(tmp, sizeof(ds7ext_t));
@@ -1064,7 +1239,7 @@ vtoc_update_format7_label_del (format7_label_t *f7, int verbose,
 
 		if ((a == ext->a) && (b < ext->b)) {
 			/* left-bounded in free space gap */
-			ext->a = b + 1;
+			ext->a = b;
 
 			if (verbose)
 				puts ("FMT7 add extent: left-bounded");
@@ -1075,7 +1250,7 @@ vtoc_update_format7_label_del (format7_label_t *f7, int verbose,
 
 		if ((a > ext->a) && (b == ext->b)) {
 			/* right-bounded in free space gap */
-			ext->b = a - 1;
+			ext->b = a;
 
 			if (verbose)
 				puts ("FMT7 add extent: right-bounded");
@@ -1086,8 +1261,8 @@ vtoc_update_format7_label_del (format7_label_t *f7, int verbose,
 
 		if ((a > ext->a) && (b < ext->b)) {
 			/* partition devides free space into 2 pieces */
-			vtoc_update_format7_label_add(f7, verbose, b+1, ext->b);
-			ext->b = a - 1;
+			vtoc_update_format7_label_add(f7, verbose, b, ext->b);
+			ext->b = a;
 
 			if (verbose)
 				puts ("FMT7 add extent: 2 pieces");
@@ -1117,14 +1292,19 @@ vtoc_update_format7_label_del (format7_label_t *f7, int verbose,
 void
 vtoc_set_freespace(format4_label_t *f4, format5_label_t *f5,
                    format7_label_t *f7, char ch, int verbose,
-                   u_int32_t start, u_int32_t stop, int cyl, int trk)
+                   u_int32_t start, u_int32_t stop, u_int32_t cyl,
+                   u_int32_t trk)
 {
 	PDEBUG
 	if ((cyl * trk) > BIG_DISK_SIZE) {
 		if (ch == '+')
-			vtoc_update_format7_label_add(f7, verbose, start, stop);
+			vtoc_update_format7_label_add(f7, verbose, start,
+						      /* ds7ext RTA + 1 */
+						      stop + 1);
 		else if (ch == '-')
-			vtoc_update_format7_label_del(f7, verbose, start, stop);
+			vtoc_update_format7_label_del(f7, verbose, start,
+						      /* ds7ext RTA + 1 */
+						      stop + 1);
 		else
 			puts ("BUG: syntax error in vtoc_set_freespace call");
 
