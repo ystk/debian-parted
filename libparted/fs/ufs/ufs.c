@@ -1,6 +1,6 @@
 /*
     libparted - a library for manipulating disk partitions
-    Copyright (C) 2001, 2007, 2009-2010 Free Software Foundation, Inc.
+    Copyright (C) 2001, 2007, 2009-2014 Free Software Foundation, Inc.
 
     This program is free software; you can redistribute it and/or modify
     it under the terms of the GNU General Public License as published by
@@ -33,10 +33,6 @@
 
 #include <unistd.h>
 #include <string.h>
-
-#define SUN_UFS_BLOCK_SIZES       ((int[2]){512, 0})
-#define HP_UFS_BLOCK_SIZES        ((int[2]){512, 0})
-
 
 /* taken from ufs_fs.h in Linux */
 #define	UFS_MAXNAMLEN 255
@@ -178,24 +174,26 @@ struct ufs_super_block {
 static PedGeometry*
 ufs_probe_sun (PedGeometry* geom)
 {
-	int8_t buf[512 * 3];
+	const int	sectors = ((3 * 512) + geom->dev->sector_size - 1) /
+				   geom->dev->sector_size;
+	char *		buf = alloca (sectors * geom->dev->sector_size);
 	struct ufs_super_block *sb;
 
 	if (geom->length < 5)
 		return 0;
-	if (!ped_geometry_read (geom, buf, 16, 3))
+	if (!ped_geometry_read (geom, buf, 16 * 512 / geom->dev->sector_size, sectors))
 		return 0;
 
 	sb = (struct ufs_super_block *)buf;
 
 	if (PED_BE32_TO_CPU(sb->fs_magic) == UFS_MAGIC) {
-		PedSector block_size = PED_BE32_TO_CPU(sb->fs_bsize) / 512;
+		PedSector block_size = PED_BE32_TO_CPU(sb->fs_bsize) / geom->dev->sector_size;
 		PedSector block_count = PED_BE32_TO_CPU(sb->fs_size);
 		return ped_geometry_new (geom->dev, geom->start,
 					 block_size * block_count);
 	}
 	if (PED_LE32_TO_CPU(sb->fs_magic) == UFS_MAGIC) {
-		PedSector block_size = PED_LE32_TO_CPU(sb->fs_bsize) / 512;
+		PedSector block_size = PED_LE32_TO_CPU(sb->fs_bsize) / geom->dev->sector_size;
 		PedSector block_count = PED_LE32_TO_CPU(sb->fs_size);
 		return ped_geometry_new (geom->dev, geom->start,
 					 block_size * block_count);
@@ -206,14 +204,17 @@ ufs_probe_sun (PedGeometry* geom)
 static PedGeometry*
 ufs_probe_hp (PedGeometry* geom)
 {
-	int8_t buf[1536];
 	struct ufs_super_block *sb;
 	PedSector block_size;
 	PedSector block_count;
 
 	if (geom->length < 5)
 		return 0;
-	if (!ped_geometry_read (geom, buf, 16, 3))
+	const int	sectors = ((3 * 512) + geom->dev->sector_size - 1) /
+				   geom->dev->sector_size;
+	char *		buf = alloca (sectors * geom->dev->sector_size);
+
+	if (!ped_geometry_read (geom, buf, 16 * 512 / geom->dev->sector_size, sectors))
 		return 0;
 
 	sb = (struct ufs_super_block *)buf;
@@ -223,7 +224,7 @@ ufs_probe_hp (PedGeometry* geom)
 		case UFS_MAGIC_LFN:
 		case UFS_MAGIC_FEA:
 		case UFS_MAGIC_4GB:
-			block_size = PED_BE32_TO_CPU(sb->fs_bsize) / 512;
+			block_size = PED_BE32_TO_CPU(sb->fs_bsize) / geom->dev->sector_size;
 			block_count = PED_BE32_TO_CPU(sb->fs_size);
 			return ped_geometry_new (geom->dev, geom->start,
 						 block_size * block_count);
@@ -234,7 +235,7 @@ ufs_probe_hp (PedGeometry* geom)
 		case UFS_MAGIC_LFN:
 		case UFS_MAGIC_FEA:
 		case UFS_MAGIC_4GB:
-			block_size = PED_LE32_TO_CPU(sb->fs_bsize) / 512;
+			block_size = PED_LE32_TO_CPU(sb->fs_bsize) / geom->dev->sector_size;
 			block_count = PED_LE32_TO_CPU(sb->fs_size);
 			return ped_geometry_new (geom->dev, geom->start,
 						 block_size * block_count);
@@ -242,75 +243,30 @@ ufs_probe_hp (PedGeometry* geom)
 	return NULL;
 }
 
-#ifndef DISCOVER_ONLY
-static int
-ufs_clobber (PedGeometry* geom)
-{
-	char	buf[1536];
-
-	if (!ped_geometry_read (geom, buf, 16, 3))
-		return 0;
-
-	memset (buf, 0, sizeof(struct ufs_super_block));
-
-	return ped_geometry_write (geom, buf, 16, 3);
-}
-#endif /* !DISCOVER_ONLY */
-
 static PedFileSystemOps ufs_ops_sun = {
 	probe:		ufs_probe_sun,
-#ifndef DISCOVER_ONLY
-	clobber:	ufs_clobber,
-#else
-	clobber:	NULL,
-#endif
-	open:		NULL,
-	create:		NULL,
-	close:		NULL,
-	check:		NULL,
-	copy:		NULL,
-	resize:		NULL,
-	get_create_constraint:	NULL,
-	get_resize_constraint:	NULL,
-	get_copy_constraint:	NULL
 };
 
 static PedFileSystemOps ufs_ops_hp = {
 	probe:		ufs_probe_hp,
-#ifndef DISCOVER_ONLY
-	clobber:	ufs_clobber,
-#else
-	clobber:	NULL,
-#endif
-	open:		NULL,
-	create:		NULL,
-	close:		NULL,
-	check:		NULL,
-	copy:		NULL,
-	resize:		NULL,
-	get_create_constraint:	NULL,
-	get_resize_constraint:	NULL,
-	get_copy_constraint:	NULL
 };
 
 static PedFileSystemType ufs_type_sun = {
 	next:	NULL,
 	ops:	&ufs_ops_sun,
 	name:	"sun-ufs",
-	block_sizes: SUN_UFS_BLOCK_SIZES
 };
 
 static PedFileSystemType ufs_type_hp = {
 	next:   NULL,
 	ops:    &ufs_ops_hp,
 	name:   "hp-ufs",
-	block_sizes: HP_UFS_BLOCK_SIZES
 };
 
 void
 ped_file_system_ufs_init ()
 {
-	PED_ASSERT (sizeof (struct ufs_super_block) == 1380, return);
+	PED_ASSERT (sizeof (struct ufs_super_block) == 1380);
 
 	ped_file_system_type_register (&ufs_type_sun);
 	ped_file_system_type_register (&ufs_type_hp);

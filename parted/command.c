@@ -1,7 +1,6 @@
 /*
     parted - a frontend to libparted
-    Copyright (C) 1999-2000, 2007, 2009-2010 Free Software Foundation,
-    Inc.
+    Copyright (C) 1999-2000, 2007, 2009-2014 Free Software Foundation, Inc.
 
     This program is free software; you can redistribute it and/or modify
     it under the terms of the GNU General Public License as published by
@@ -29,7 +28,7 @@
 
 Command*
 command_create (const StrList* names,
-		int (*method) (PedDevice** dev),
+		int (*method) (PedDevice** dev, PedDisk** diskp),
 		const StrList* summary,
 		const StrList* help,
                 const int non_interactive)
@@ -119,8 +118,10 @@ command_get_names (Command** list)
 void
 command_print_summary (Command* cmd)
 {
+        if (cmd->summary == NULL)
+                return;
         fputs ("  ", stdout);
-	str_list_print_wrap (cmd->summary, screen_width(), 2, 8);
+	str_list_print_wrap (cmd->summary, screen_width(), 2, 8, stdout);
 	putchar ('\n');
 }
 
@@ -130,12 +131,12 @@ command_print_help (Command* cmd)
 	command_print_summary (cmd);
 	if (cmd->help) {
                 fputs ("\n\t", stdout);
-		str_list_print_wrap (cmd->help, screen_width(), 8, 8);
+		str_list_print_wrap (cmd->help, screen_width(), 8, 8, stdout);
 	}
 }
 
 int
-command_run (Command* cmd, PedDevice** dev)
+command_run (Command* cmd, PedDevice** dev, PedDisk** diskp)
 {
-	return cmd->method (dev);
+	return cmd->method (dev, diskp);
 }

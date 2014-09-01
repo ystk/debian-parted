@@ -1,7 +1,7 @@
 #!/bin/sh
 # Ensure that palo and prep types work properly.
 
-# Copyright (C) 2010 Free Software Foundation, Inc.
+# Copyright (C) 2010-2014 Free Software Foundation, Inc.
 
 # This program is free software; you can redistribute it and/or modify
 # it under the terms of the GNU General Public License as published by
@@ -16,22 +16,15 @@
 # You should have received a copy of the GNU General Public License
 # along with this program.  If not, see <http://www.gnu.org/licenses/>.
 
-if test "$VERBOSE" = yes; then
-  set -x
-  parted --version
-fi
-
-: ${srcdir=.}
-. $srcdir/t-lib.sh
+. "${srcdir=.}/init.sh"; path_prepend_ ../parted
 ss=$sector_size_
 
 cat > exp <<EOF || framework_failure
-1:2048s:4095s:2048s:::palo;
-1:2048s:4095s:2048s:::prep;
-1:2048s:4095s:2048s:::palo;
+1:2048s:4095s:2048s:ext2::lba, palo;
+1:2048s:4095s:2048s:ext2::lba, prep;
+1:2048s:4095s:2048s:ext2::lba, palo;
 EOF
 
-fail=0
 dev=dev-file
 
 n_sectors=5000
@@ -44,8 +37,8 @@ parted -m -s $dev mklabel msdos \
   set 1 palo on u s print \
     > out 2> err || fail=1
 
-grep -E '^1:2048s:4095s:2048s:::p...;$' out > k; mv k out
+grep -E '^1:2048s:4095s:2048s:ext2::lba, p...;$' out > k; mv k out
 
-compare out exp || fail=1
+compare exp out || fail=1
 
 Exit $fail

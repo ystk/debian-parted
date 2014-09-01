@@ -59,6 +59,48 @@ setpos (fdasd_anchor_t *anc, int dsn, int pos)
 	anc->partno[dsn] = pos;
 }
 
+static u_int32_t
+get_usable_cylinders (fdasd_anchor_t *anc)
+{
+	u_int32_t cyl;
+
+	/* large volume */
+	if (anc->f4->DS4DEVCT.DS4DSCYL == LV_COMPAT_CYL &&
+	    anc->f4->DS4DCYL > anc->f4->DS4DEVCT.DS4DSCYL)
+		return anc->f4->DS4DCYL;
+	/* normal volume */
+	if (anc->f4->DS4DEVCT.DS4DEVFG & ALTERNATE_CYLINDERS_USED)
+		cyl = anc->f4->DS4DEVCT.DS4DSCYL -
+			(u_int16_t) anc->f4->DS4DEVAC;
+	else
+		cyl = anc->f4->DS4DEVCT.DS4DSCYL;
+	return cyl;
+}
+
+static void
+get_addr_of_highest_f1_f8_label (fdasd_anchor_t *anc, cchhb_t *addr)
+{
+
+	u_int8_t record;
+	/* We have to count the follwing labels:
+	 * one format 4
+	 * one format 5
+	 * format 7 only if we have moren then BIG_DISK_SIZE tracks
+	 * one for each format 1 or format 8 label == one for each partition
+	 * one for each format 9 label before the last format 8
+	 * We assume that all partitions use format 8 labels when
+	 *  anc->formatted_cylinders > LV_COMPAT_CYL
+	 * Note: Record zero is special, so block 0 on our disk is record 1!
+	 */
+
+	record = anc->used_partitions + 2;
+	if (anc->big_disk)
+		record++;
+	if (anc->formatted_cylinders > LV_COMPAT_CYL)
+		record += anc->used_partitions - 1;
+	vtoc_set_cchhb(addr, VTOC_START_CC, VTOC_START_HH, record);
+}
+
 void
 fdasd_cleanup (fdasd_anchor_t *anchor)
 {
@@ -72,6 +114,7 @@ fdasd_cleanup (fdasd_anchor_t *anchor)
         free(anchor->f4);
         free(anchor->f5);
         free(anchor->f7);
+        free(anchor->f9);
         free(anchor->vlabel);
 
 	p = anchor->first;
@@ -82,6 +125,7 @@ fdasd_cleanup (fdasd_anchor_t *anchor)
 		if (p == NULL)
 			return;
 		q = p->next;
+		free(p->f1);
 		free(p);
 		p = q;
 	}
@@ -154,17 +198,6 @@ fdasd_error (fdasd_anchor_t *anc, enum fdasd_failure why, char const *str)
 }
 
 /*
- * converts cyl-cyl-head-head-blk to blk
- */
-static unsigned long
-cchhb2blk (cchhb_t *p, struct fdasd_hd_geometry *geo)
-{
-	PDEBUG
-	return (unsigned long) (p->cc * geo->heads * geo->sectors
-	                        + p->hh * geo->sectors + p->b);
-}
-
-/*
  * initializes the anchor structure and allocates some
  * memory for the labels
  */
@@ -216,9 +249,16 @@ fdasd_initialize_anchor (fdasd_anchor_t * anc)
 	if (anc->f7 == NULL)
 		fdasd_error(anc, malloc_failed, "FMT7 DSCB.");
 
+       /* template for all format 9 labels */
+	anc->f9 = malloc(sizeof(format9_label_t));
+	if (anc->f9 == NULL)
+		fdasd_error(anc, malloc_failed, "FMT9 DSCB.");
+
 	bzero(anc->f4, sizeof(format4_label_t));
 	bzero(anc->f5, sizeof(format5_label_t));
 	bzero(anc->f7, sizeof(format7_label_t));
+	bzero(anc->f9, sizeof(format9_label_t));
+	vtoc_init_format9_label(anc->f9);
 
 	v = malloc(sizeof(volume_label_t));
 	if (v == NULL)
@@ -259,6 +299,9 @@ fdasd_initialize_anchor (fdasd_anchor_t * anc)
 
 		q = p;
 	}
+	anc->hw_cylinders = 0;
+	anc->formatted_cylinders = 0;
+	anc->is_file = 0;
 }
 
 /*
@@ -269,44 +312,46 @@ fdasd_write_vtoc_labels (fdasd_anchor_t * anc, int fd)
 {
 	PDEBUG
 	partition_info_t *p;
-	unsigned long b;
+	unsigned long b, maxblk;
 	char dsno[6], s1[7], s2[45], *c1, *c2, *ch;
 	int i = 0, k = 0;
+	cchhb_t f9addr;
+	format1_label_t emptyf1;
 
 	b = (cchhb2blk (&anc->vlabel->vtoc, &anc->geo) - 1) * anc->blksize;
 	if (b <= 0)
 		fdasd_error (anc, vlabel_corrupted, "");
+	maxblk = b + anc->blksize * 9; /* f4+f5+f7+3*f8+3*f9 */
 
 	/* write FMT4 DSCB */
-	vtoc_write_label (fd, b, NULL, anc->f4, NULL, NULL);
+	vtoc_write_label (fd, b, NULL, anc->f4, NULL, NULL, NULL);
+	b += anc->blksize;
 
 	/* write FMT5 DSCB */
+	vtoc_write_label (fd, b, NULL, NULL, anc->f5, NULL, NULL);
 	b += anc->blksize;
-	vtoc_write_label (fd, b, NULL, NULL, anc->f5, NULL);
 
 	/* write FMT7 DSCB */
 	if (anc->big_disk) {
+		vtoc_write_label (fd, b, NULL, NULL, NULL, anc->f7, NULL);
 		b += anc->blksize;
-		vtoc_write_label (fd, b, NULL, NULL, NULL, anc->f7);
 	}
 
-	/* loop over all FMT1 DSCBs */
-	p = anc->first;
-	for (i = 0; i < USABLE_PARTITIONS; i++) {
-		b += anc->blksize;
+	/* loop over all partitions (format 1 or format 8 DCB) */
+	for (p = anc->first; p != NULL; p = p->next) {
 
 		if (p->used != 0x01) {
-			vtoc_write_label (fd, b, p->f1, NULL, NULL, NULL);
 			continue;
 		}
 
+		i++;
 		strncpy (p->f1->DS1DSSN, anc->vlabel->volid, 6);
 
 		ch = p->f1->DS1DSNAM;
 		vtoc_ebcdic_dec (ch, ch, 44);
 		c1 = ch + 7;
 
-		if (getdsn (anc, i) > -1) {
+		if (getdsn (anc, i-1) > -1) {
 			/* re-use the existing data set name */
 			c2 = strchr (c1, '.');
 			if (c2 != NULL)
@@ -325,11 +370,7 @@ fdasd_write_vtoc_labels (fdasd_anchor_t * anc, int fd)
 			while (getpos (anc, k) > -1)
 				k++;
 
-			setpos (anc, k, i);
-
-			strncpy (s2, ch, 44);
-			s2[44] = 0;
-			vtoc_ebcdic_dec (s2, s2, 44);
+			setpos (anc, k, i-1);
 
 			strncpy (ch, "LINUX.V               " "                      ", 44);
 
@@ -366,8 +407,32 @@ fdasd_write_vtoc_labels (fdasd_anchor_t * anc, int fd)
 
 		vtoc_ebcdic_enc (ch, ch, 44);
 
-		vtoc_write_label (fd, b, p->f1, NULL, NULL, NULL);
-		p = p->next;
+		if (p->f1->DS1FMTID == 0xf8 ) {
+			/* Now as we know where which label will be written, we
+			 * can add the address of the format 9 label to the
+			 * format 8 label. The f9 record will be written to the
+			 * block after the current blk. Remember: records are of
+			 * by one, so we have to add 2 and not just one.
+			 */
+			vtoc_set_cchhb(&f9addr, VTOC_START_CC, VTOC_START_HH,
+				((b / anc->blksize) % anc->geo.sectors) + 2);
+			vtoc_update_format8_label(&f9addr, p->f1);
+			vtoc_write_label(fd, b, p->f1, NULL, NULL, NULL, NULL);
+			b += anc->blksize;
+			vtoc_write_label(fd, b, NULL, NULL, NULL, NULL,
+					 anc->f9);
+			b += anc->blksize;
+		} else {
+			vtoc_write_label(fd, b, p->f1, NULL, NULL, NULL, NULL);
+			b += anc->blksize;
+		}
+	}
+
+	/* write empty labels to the rest of the blocks */
+	bzero(&emptyf1, sizeof(emptyf1));
+	while (b < maxblk) {
+		vtoc_write_label(fd, b, &emptyf1, NULL, NULL, NULL, NULL);
+		b += anc->blksize;
 	}
 }
 
@@ -394,20 +459,25 @@ int
 fdasd_prepare_labels (fdasd_anchor_t *anc, int fd)
 {
 	PDEBUG
-	partition_info_t *p = anc->first;
+	partition_info_t *p;
 	char dsno[6], s1[7], s2[45], *c1, *c2, *ch;
 	int i = 0, k = 0;
 
-	/* loop over all FMT1 DSCBs */
-	p = anc->first;
-	for (i = 0; i < USABLE_PARTITIONS; i++) {
+	/* loop over all partitions (format 1 or format 8 DCB) */
+	for (p = anc->first; p != NULL; p = p->next) {
+
+		if (p->used != 0x01) {
+			continue;
+		}
+
+		i++;
 		strncpy (p->f1->DS1DSSN, anc->vlabel->volid, 6);
 
 		ch = p->f1->DS1DSNAM;
 		vtoc_ebcdic_dec (ch, ch, 44);
 		c1 = ch + 7;
 
-		if (getdsn (anc, i) > -1) {
+		if (getdsn (anc, i-1) > -1) {
 			/* re-use the existing data set name */
 			c2 = strchr (c1, '.');
 			if (c2 != NULL)
@@ -426,11 +496,7 @@ fdasd_prepare_labels (fdasd_anchor_t *anc, int fd)
 			while (getpos (anc, k) > -1)
 				k++;
 
-			setpos (anc, k, i);
-
-			strncpy (s2, ch, 44);
-			s2[44] = 0;
-			vtoc_ebcdic_dec (s2, s2, 44);
+			setpos (anc, k, i-1);
 
 			strncpy (ch, "LINUX.V               " "                      ", 44);
 
@@ -466,7 +532,6 @@ fdasd_prepare_labels (fdasd_anchor_t *anc, int fd)
 		}
 
 		vtoc_ebcdic_enc (ch, ch, 44);
-		p = p->next;
 	}
 
 	return 1;
@@ -482,6 +547,7 @@ fdasd_recreate_vtoc (fdasd_anchor_t *anc)
 	vtoc_init_format4_label(anc->f4,
 							USABLE_PARTITIONS,
 							anc->geo.cylinders,
+						anc->formatted_cylinders,
 							anc->geo.heads,
 							anc->geo.sectors,
 							anc->blksize,
@@ -492,8 +558,8 @@ fdasd_recreate_vtoc (fdasd_anchor_t *anc)
 	vtoc_set_freespace(anc->f4, anc->f5, anc->f7,
 					   '+', anc->verbose,
 					   FIRST_USABLE_TRK,
-					   anc->geo.cylinders * anc->geo.heads - 1,
-					   anc->geo.cylinders, anc->geo.heads);
+				anc->formatted_cylinders * anc->geo.heads - 1,
+				anc->formatted_cylinders, anc->geo.heads);
 
 	for (i = 0; i < USABLE_PARTITIONS; i++) {
 		bzero(p->f1, sizeof(format1_label_t));
@@ -507,13 +573,30 @@ fdasd_recreate_vtoc (fdasd_anchor_t *anc)
 	}
 
 	anc->used_partitions = 0;
-	anc->fspace_trk = anc->geo.cylinders * anc->geo.heads - FIRST_USABLE_TRK;
+	anc->fspace_trk = anc->formatted_cylinders * anc->geo.heads -
+			  FIRST_USABLE_TRK;
 
 	for (i=0; i<USABLE_PARTITIONS; i++)
 		setpos(anc, i, -1);
 
 	anc->vtoc_changed++;
 }
+
+ /*
+ * initialize the VOL1 volume label
+ */
+static void
+fdasd_init_volume_label(fdasd_anchor_t *anc, int fd)
+{
+	volume_label_t *vlabel = anc->vlabel;
+
+	vtoc_volume_label_init(vlabel);
+	vtoc_volume_label_set_key(vlabel, "VOL1");
+	vtoc_volume_label_set_label(vlabel, "VOL1");
+
+	vtoc_set_cchhb(&vlabel->vtoc, VTOC_START_CC, VTOC_START_HH, 0x01);
+}
+
 
 /*
  * sets some important partition data
@@ -526,15 +609,15 @@ fdasd_update_partition_info (fdasd_anchor_t *anc)
 {
 	PDEBUG
 	partition_info_t *q = NULL, *p = anc->first;
-	unsigned int h = anc->geo.heads;
-	unsigned long max = anc->geo.cylinders * h - 1;
+	unsigned long max = anc->formatted_cylinders * anc->geo.heads - 1;
 	int i;
 	char *ch;
 
 	anc->used_partitions = anc->geo.sectors - 2 - anc->f4->DS4DSREC;
 
 	for (i = 1; i <= USABLE_PARTITIONS; i++) {
-		if (p->f1->DS1FMTID != 0xf1) {
+		if (p->f1->DS1FMTID != 0xf1 &&
+		    p->f1->DS1FMTID != 0xf8) {
 			if (i == 1)
 				/* there is no partition at all */
 				anc->fspace_trk = max - FIRST_USABLE_TRK + 1;
@@ -546,8 +629,8 @@ fdasd_update_partition_info (fdasd_anchor_t *anc)
 
 		/* this is a valid format 1 label */
 		p->used = 0x01;
-		p->start_trk = p->f1->DS1EXT1.llimit.cc * h + p->f1->DS1EXT1.llimit.hh;
-		p->end_trk   = p->f1->DS1EXT1.ulimit.cc * h + p->f1->DS1EXT1.ulimit.hh;
+		p->start_trk = cchh2trk(&p->f1->DS1EXT1.llimit,	&anc->geo);
+		p->end_trk = cchh2trk(&p->f1->DS1EXT1.ulimit, &anc->geo);
 		p->len_trk   = p->end_trk - p->start_trk + 1;
 
 		if (i == 1) {
@@ -618,14 +701,22 @@ fdasd_process_valid_vtoc (fdasd_anchor_t * anc, unsigned long b, int fd)
 	format1_label_t q;
 	char s[5], *ch;
 
+	if (anc->f4->DS4DEVCT.DS4DSCYL == LV_COMPAT_CYL &&
+	    anc->f4->DS4DCYL > anc->f4->DS4DEVCT.DS4DSCYL)
+		anc->formatted_cylinders = anc->f4->DS4DCYL;
+	else
+		anc->formatted_cylinders = anc->f4->DS4DEVCT.DS4DSCYL;
+	anc->fspace_trk = anc->formatted_cylinders * anc->geo.heads -
+			  FIRST_USABLE_TRK;
 	b += anc->blksize;
 
-	for (i = 1; i <= anc->geo.sectors; i++) {
+	for (i = 1; i < anc->geo.sectors; i++) {
 		bzero (&q, f1size);
 		vtoc_read_label (fd, b, &q, NULL, NULL, NULL);
 
 		switch (q.DS1FMTID) {
 			case 0xf1:
+			case 0xf8:
 				if (p == NULL)
 					break;
 				memcpy (p->f1, &q, f1size);
@@ -669,6 +760,12 @@ fdasd_process_valid_vtoc (fdasd_anchor_t * anc, unsigned long b, int fd)
 					memcpy (anc->f7, &q, f1size);
 				f7_counter++;
 				break;
+			case 0xf9:
+				/* each format 8 lable has an associated
+				 * format 9 lable, but they are of no further
+				 * use to us.
+				 */
+				break;
 		}
 
 		b += anc->blksize;
@@ -689,6 +786,52 @@ fdasd_process_valid_vtoc (fdasd_anchor_t * anc, unsigned long b, int fd)
 	fdasd_update_partition_info (anc);
 }
 
+static void
+fdasd_invalid_vtoc_pointer(fdasd_anchor_t *anc)
+{
+	PDEBUG
+	anc->formatted_cylinders = anc->hw_cylinders;
+	anc->fspace_trk = anc->formatted_cylinders * anc->geo.heads
+			- FIRST_USABLE_TRK;
+	vtoc_init_format4_label(anc->f4, USABLE_PARTITIONS,
+			anc->geo.cylinders, anc->formatted_cylinders,
+			anc->geo.heads, anc->geo.sectors,
+			anc->blksize, anc->dev_type);
+
+	vtoc_init_format5_label(anc->f5);
+	vtoc_init_format7_label(anc->f7);
+
+	vtoc_set_freespace(anc->f4, anc->f5, anc->f7, '+', anc->verbose,
+			FIRST_USABLE_TRK,
+			anc->formatted_cylinders * anc->geo.heads - 1,
+			anc->formatted_cylinders, anc->geo.heads);
+
+	vtoc_set_cchhb(&anc->vlabel->vtoc, VTOC_START_CC, VTOC_START_HH, 0x01);
+}
+
+/*
+ * we have a invalid FMT4 DSCB and therefore we will re-create the VTOC
+ */
+static void
+fdasd_process_invalid_vtoc(fdasd_anchor_t *anc)
+{
+	anc->formatted_cylinders = anc->hw_cylinders;
+	anc->fspace_trk = anc->formatted_cylinders * anc->geo.heads
+			- FIRST_USABLE_TRK;
+	vtoc_init_format4_label(anc->f4, USABLE_PARTITIONS,
+			anc->geo.cylinders, anc->formatted_cylinders,
+			anc->geo.heads, anc->geo.sectors,
+			anc->blksize, anc->dev_type);
+
+	vtoc_init_format5_label(anc->f5);
+	vtoc_init_format7_label(anc->f7);
+	vtoc_set_freespace(anc->f4, anc->f5, anc->f7, '+', anc->verbose,
+			FIRST_USABLE_TRK,
+			anc->formatted_cylinders * anc->geo.heads - 1,
+			anc->formatted_cylinders, anc->geo.heads);
+}
+
+
 static int
 fdasd_valid_vtoc_pointer(fdasd_anchor_t *anc, unsigned long b, int fd)
 {
@@ -698,15 +841,18 @@ fdasd_valid_vtoc_pointer(fdasd_anchor_t *anc, unsigned long b, int fd)
 	/* VOL1 label contains valid VTOC pointer */
 	vtoc_read_label (fd, b, NULL, anc->f4, NULL, NULL);
 
-	if (anc->f4->DS4IDFMT != 0xf4) {
-		if (strncmp(anc->vlabel->volkey,vtoc_ebcdic_enc("LNX1",str,4),4) == 0)
-			return 0;
-		fdasd_error(anc, wrong_disk_format, _("Invalid VTOC."));
-	} else {
+	if (anc->f4->DS4IDFMT == 0xf4) {
 		fdasd_process_valid_vtoc (anc, b, fd);
+		return 0;
+	} else {
+		fdasd_process_invalid_vtoc(anc);
 	}
+	if (strncmp(anc->vlabel->volkey, vtoc_ebcdic_enc("LNX1",str,4),4) == 0 ||
+	    strncmp(anc->vlabel->volkey, vtoc_ebcdic_enc("CMS1",str,4),4) == 0)
+		return 0;
 
-	return 0;
+	fdasd_error(anc, wrong_disk_format, _("Invalid VTOC."));
+	return 1;
 }
 
 /*
@@ -717,30 +863,58 @@ fdasd_check_volume (fdasd_anchor_t *anc, int fd)
 {
 	PDEBUG
 	volume_label_t *v = anc->vlabel;
-	unsigned long b = -1;
+	long long b = -1;
 	char str[LINE_LENGTH];
 
+	memset(v, 0, sizeof(volume_label_t));
 	vtoc_read_volume_label (fd, anc->label_pos, v);
 
 	if (strncmp(v->vollbl, vtoc_ebcdic_enc ("VOL1", str, 4), 4) == 0) {
-		/* found VOL1 volume label */
-		b = (cchhb2blk (&v->vtoc, &anc->geo) - 1) * anc->blksize;
+		if (anc->FBA_layout != 1 ) {
+			/* found VOL1 volume label */
+			b = (cchhb2blk (&v->vtoc, &anc->geo) - 1) * anc->blksize;
 
-		if (b > 0) {
-			int rc;
-			rc = fdasd_valid_vtoc_pointer (anc, b, fd);
+			if (b > 0) {
+				int rc;
+				rc = fdasd_valid_vtoc_pointer (anc, b, fd);
 
-			if (rc < 0)
-				return 1;
-			else
-				return 0;
-		} else {
-			return 1;
+				if (rc < 0)
+					return 1;
+				else
+					return 0;
+			} else {
+				fdasd_invalid_vtoc_pointer(anc);
+			}
 		}
-	} else if (strncmp (v->volkey, vtoc_ebcdic_enc ("LNX1", str, 4), 4) == 0) {
+	} else if (strncmp (v->volkey, vtoc_ebcdic_enc ("LNX1", str, 4), 4) == 0 ||
+	           strncmp (v->volkey, vtoc_ebcdic_enc ("CMS1", str, 4), 4) == 0) {
+		return 0;
+	} else if (anc->FBA_layout == 1) {
+		/* Some times LDL formatted disks does not
+		   contain any volume label */
+		return 1;
+	} else if (! anc->is_file) {
+	/* didn't find VOL1 volume label */
+		anc->formatted_cylinders = anc->hw_cylinders;
+		anc->fspace_trk = anc->formatted_cylinders * anc->geo.heads
+					- FIRST_USABLE_TRK;
+
+		fdasd_init_volume_label(anc, fd);
+
+		vtoc_init_format4_label(anc->f4, USABLE_PARTITIONS,
+				anc->geo.cylinders, anc->formatted_cylinders,
+				anc->geo.heads, anc->geo.sectors,
+				anc->blksize, anc->dev_type);
+
+		vtoc_init_format5_label(anc->f5);
+		vtoc_init_format7_label(anc->f7);
+
+		vtoc_set_freespace(anc->f4, anc->f5, anc->f7, '+',
+			anc->verbose, FIRST_USABLE_TRK,
+			anc->formatted_cylinders * anc->geo.heads - 1,
+			anc->formatted_cylinders, anc->geo.heads);
 		return 0;
 	}
-
 	return 1;
 }
 
@@ -752,7 +926,7 @@ fdasd_check_api_version (fdasd_anchor_t *anc, int f)
 {
 	PDEBUG
 	int api;
-	char s[LINE_LENGTH];
+	char s[2*LINE_LENGTH];
 
         struct stat st;
         if (fstat (f, &st) == 0 && S_ISREG (st.st_mode)) {
@@ -781,6 +955,7 @@ fdasd_get_geometry (const PedDevice *dev, fdasd_anchor_t *anc, int f)
 	PDEBUG
 	int blksize = 0;
 	dasd_information_t dasd_info;
+	struct dasd_eckd_characteristics *characteristics;
 
 	/* We can't get geometry from a regular file,
 	   so simulate something usable, for the sake of testing.  */
@@ -798,6 +973,11 @@ fdasd_get_geometry (const PedDevice *dev, fdasd_anchor_t *anc, int f)
 	    dasd_info.dev_type = 13200;
 	    dasd_info.label_block = 2;
 	    dasd_info.devno = 513;
+	    dasd_info.label_block = 2;
+	    dasd_info.FBA_layout = 0;
+	    anc->hw_cylinders = ((st.st_size / blksize) / anc->geo.sectors) /
+				anc->geo.heads;
+	    anc->is_file = 1;
 	} else {
 		if (ioctl(f, HDIO_GETGEO, &anc->geo) != 0)
 			fdasd_error(anc, unable_to_ioctl,
@@ -811,18 +991,24 @@ fdasd_get_geometry (const PedDevice *dev, fdasd_anchor_t *anc, int f)
 		if (ioctl(f, BIODASDINFO, &dasd_info) != 0)
 			fdasd_error(anc, unable_to_ioctl,
 				    _("Could not retrieve disk information."));
-	}
 
-	if (strncmp(dasd_info.type, "ECKD", 4) != 0)
-		fdasd_error(anc, wrong_disk_type,
-			    _("This is not an ECKD disk!  " \
-			      "This disk type is not supported!"));
+		characteristics = (struct dasd_eckd_characteristics *)
+					&dasd_info.characteristics;
+		if (characteristics->no_cyl == LV_COMPAT_CYL &&
+		    characteristics->long_no_cyl)
+			anc->hw_cylinders = characteristics->long_no_cyl;
+		else
+			anc->hw_cylinders = characteristics->no_cyl;
+
+		anc->is_file = 0;
+	}
 
 	anc->dev_type   = dasd_info.dev_type;
 	anc->blksize    = blksize;
 	anc->label_pos  = dasd_info.label_block * blksize;
 	anc->devno      = dasd_info.devno;
-	anc->fspace_trk = anc->geo.cylinders * anc->geo.heads - FIRST_USABLE_TRK;
+	anc->label_block = dasd_info.label_block;
+	anc->FBA_layout = dasd_info.FBA_layout;
 }
 
 /*
@@ -848,20 +1034,17 @@ fdasd_get_partition_data (fdasd_anchor_t *anc, extent_t *part_extent,
                           unsigned int *stop_ptr)
 {
 	PDEBUG
-	unsigned int limit, cc, hh;
+	unsigned int limit;
+	u_int32_t cc, c;
+	u_int16_t hh, h;
 	cchh_t llimit, ulimit;
 	partition_info_t *q;
 	u_int8_t b1, b2;
-	u_int16_t c, h;
 	unsigned int start = *start_ptr, stop = *stop_ptr;
 	int i;
 	char *ch;
 
-	if (anc->f4->DS4DEVCT.DS4DEVFG & ALTERNATE_CYLINDERS_USED)
-		c = anc->f4->DS4DEVCT.DS4DSCYL - (u_int16_t) anc->f4->DS4DEVAC;
-	else
-		c = anc->f4->DS4DEVCT.DS4DSCYL;
-
+	c = get_usable_cylinders(anc);
 	h = anc->f4->DS4DEVCT.DS4DSTRK;
 	limit = (h * c - 1);
 
@@ -1017,7 +1200,6 @@ fdasd_add_partition (fdasd_anchor_t *anc, unsigned int start,
 	cchhb_t hf1;
 	partition_info_t *p;
 	extent_t ext;
-	int i;
 
 	PDEBUG;
 
@@ -1030,8 +1212,14 @@ fdasd_add_partition (fdasd_anchor_t *anc, unsigned int start,
 	if (fdasd_get_partition_data(anc, &ext, p, &start, &stop) != 0)
 		return 0;
 
-	PDEBUG;
-	vtoc_init_format1_label(anc->vlabel->volid, anc->blksize, &ext, p->f1);
+	if (anc->formatted_cylinders > LV_COMPAT_CYL) {
+		vtoc_init_format8_label(anc->vlabel->volid, anc->blksize, &ext,
+					p->f1);
+	} else {
+		PDEBUG;
+		vtoc_init_format1_label(anc->vlabel->volid, anc->blksize, &ext,
+					p->f1);
+	}
 
 	PDEBUG;
 	fdasd_enqueue_new_partition(anc);
@@ -1039,23 +1227,17 @@ fdasd_add_partition (fdasd_anchor_t *anc, unsigned int start,
 	PDEBUG;
 	anc->used_partitions += 1;
 
-	i = anc->used_partitions + 2;
-	if (anc->big_disk)
-		i++;
-	PDEBUG;
-
-	vtoc_set_cchhb(&hf1, VTOC_START_CC, VTOC_START_HH, i);
-
+	get_addr_of_highest_f1_f8_label(anc, &hf1);
 	vtoc_update_format4_label(anc->f4, &hf1, anc->f4->DS4DSREC - 1);
 
 	PDEBUG;
 
-	start = ext.llimit.cc * anc->geo.heads + ext.llimit.hh;
-	stop  = ext.ulimit.cc * anc->geo.heads + ext.ulimit.hh;
+	start = cchh2trk(&ext.llimit, &anc->geo);
+	stop = cchh2trk(&ext.ulimit, &anc->geo);
 
 	PDEBUG;
 	vtoc_set_freespace(anc->f4, anc->f5, anc->f7, '-', anc->verbose,
-					   start, stop, anc->geo.cylinders, anc->geo.heads);
+			start, stop, anc->formatted_cylinders, anc->geo.heads);
 
 	anc->vtoc_changed++;
 

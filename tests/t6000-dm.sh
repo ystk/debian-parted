@@ -1,7 +1,7 @@
 #!/bin/sh
 # ensure that parted can distinguish device map types: linear, multipath
 
-# Copyright (C) 2008-2010 Free Software Foundation, Inc.
+# Copyright (C) 2008-2014 Free Software Foundation, Inc.
 
 # This program is free software; you can redistribute it and/or modify
 # it under the terms of the GNU General Public License as published by
@@ -16,19 +16,13 @@
 # You should have received a copy of the GNU General Public License
 # along with this program.  If not, see <http://www.gnu.org/licenses/>.
 
-if test "$VERBOSE" = yes; then
-  set -x
-  parted --version
-fi
-
-: ${srcdir=.}
-. $srcdir/t-lib.sh
+. "${srcdir=.}/init.sh"; path_prepend_ ../parted
 
 require_root_
 lvm_init_root_dir_
 
 test "x$ENABLE_DEVICE_MAPPER" = xyes \
-  || skip_test_ "no device-mapper support"
+  || skip_ "no device-mapper support"
 
 # Device maps names - should be random to not conflict with existing ones on
 # the system
@@ -37,7 +31,7 @@ mpath_=mpath-$$
 
 d1= d2= d3=
 f1= f2= f3=
-cleanup_() {
+cleanup_fn_() {
     dmsetup remove $linear_
     dmsetup remove $mpath_
     test -n "$d1" && losetup -d "$d1"
@@ -47,13 +41,17 @@ cleanup_() {
 }
 
 f1=$(pwd)/1; d1=$(loop_setup_ "$f1") \
-  || skip_test_ "is this partition mounted with 'nodev'?"
-
-fail=0
+  || skip_ "is this partition mounted with 'nodev'?"
 
 # setup: create loop devices
 f2=$(pwd)/2 && d2=$(loop_setup_ "$f2") || fail=1
 f3=$(pwd)/3 && d3=$(loop_setup_ "$f3") || fail=1
+
+# In the output of parted's print -s command,
+# replace (possibly varying) $dev name with '...'.
+sanitize() {
+  sed 's,^Disk .*: \([0-9][0-9]*\),Disk ...: \1,;s/ *$//' "$@"
+}
 
 # This loop used to include "multipath", but lvm2 changed
 # in such a way that that no longer works with loop devices.
@@ -77,22 +75,24 @@ for type in linear ; do
 
   # Create msdos partition table
   parted -s $dev mklabel msdos > out 2>&1 || fail=1
-  compare out /dev/null || fail=1
+  compare /dev/null out || fail=1
 
   parted -s "$dev" print > out 2>&1 || fail=1
+  sanitize out > k && mv k out || fail=1
 
   # Create expected output file.
   cat <<EOF >> exp || fail=1
 Model: Linux device-mapper ($type) (dm)
-Disk $dev: 524kB
+Disk ...: 524kB
 Sector size (logical/physical): 512B/512B
 Partition Table: msdos
+Disk Flags:
 
 Number  Start  End  Size  Type  File system  Flags
 
 EOF
 
-  compare out exp || fail=1
+  compare exp out || fail=1
 done
 
 Exit $fail

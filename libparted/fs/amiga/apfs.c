@@ -1,7 +1,6 @@
 /*
     apfs.c -- parted support for apfs file systems
-    Copyright (C) 1998-2000, 2007, 2009-2010 Free Software Foundation,
-    Inc.
+    Copyright (C) 1998-2000, 2007, 2009-2014 Free Software Foundation, Inc.
 
     This program is free software; you can redistribute it and/or modify
     it under the terms of the GNU General Public License as published by
@@ -47,8 +46,10 @@ _generic_apfs_probe (PedGeometry* geom, uint32_t kind)
 	struct PartitionBlock * part;
 	uint32_t blocksize = 1, reserved = 2;
 
-	PED_ASSERT (geom != NULL, return NULL);
-	PED_ASSERT (geom->dev != NULL, return NULL);
+	PED_ASSERT (geom != NULL);
+	PED_ASSERT (geom->dev != NULL);
+	if (geom->dev->sector_size != 512)
+		return NULL;
 
 	/* Finds the blocksize and reserved values of the partition block */
 	if (!(part = ped_malloc (PED_SECTOR_SIZE_DEFAULT*blocksize))) {
@@ -109,42 +110,18 @@ _apfs2_probe (PedGeometry* geom) {
 
 static PedFileSystemOps _apfs1_ops = {
 	probe:		_apfs1_probe,
-	clobber:	NULL,
-	open:		NULL,
-	create:         NULL,
-	close:		NULL,
-	check:          NULL,
-	resize:		NULL,
-	copy:           NULL,
-	get_create_constraint:	NULL,
-	get_copy_constraint:	NULL,
-	get_resize_constraint:	NULL
 };
 static PedFileSystemOps _apfs2_ops = {
 	probe:		_apfs2_probe,
-	clobber:	NULL,
-	open:		NULL,
-	create:         NULL,
-	close:		NULL,
-	check:          NULL,
-	resize:		NULL,
-	copy:           NULL,
-	get_create_constraint:	NULL,
-	get_copy_constraint:	NULL,
-	get_resize_constraint:	NULL
 };
-
-#define APFS_BLOCK_SIZES ((int[2]){512, 0})
 
 PedFileSystemType _apfs1_type = {
        next:		 NULL,
        ops:		 &_apfs1_ops,
        name:		 "apfs1",
-       block_sizes:      APFS_BLOCK_SIZES
 };
 PedFileSystemType _apfs2_type = {
        next:		 NULL,
        ops:		 &_apfs2_ops,
        name:		 "apfs2",
-       block_sizes:      APFS_BLOCK_SIZES
 };

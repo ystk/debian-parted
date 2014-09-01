@@ -3,7 +3,8 @@ BUILT_SOURCES =
 sbin_PROGRAMS = parted
 
 AM_CFLAGS = $(WARN_CFLAGS) $(WERROR_CFLAGS)
-partedincludedir      = -I$(top_srcdir)/lib -I$(top_srcdir)/include
+partedincludedir = \
+  -I$(top_srcdir)/lib -I$(top_builddir)/include -I$(top_srcdir)/include
 
 parted_SOURCES = command.c	\
 		 command.h	\
@@ -36,9 +37,6 @@ version.h: Makefile
 DISTCLEANFILES = version.c version.h
 MAINTAINERCLEANFILES = $(BUILT_SOURCES)
 
-#parted_CFLAGS = -DBUILDINFO='"\"'$(BUILDINFO)'\""'
-parted_CFLAGS = -DBUILDINFO=
-
 parted_LDADD = \
   libver.a \
   $(top_builddir)/libparted/libparted.la \
@@ -50,6 +48,6 @@ parted_LDFLAGS = $(PARTEDLDFLAGS)
 # Tell the linker to omit references to unused shared libraries.
 parted_LDFLAGS += $(IGNORE_UNUSED_LIBRARIES_CFLAGS)
 
-INCLUDES	= $(partedincludedir) $(INTLINCS)
+AM_CPPFLAGS = $(partedincludedir) $(INTLINCS)
 
 MAINTAINERCLEANFILES += Makefile.in

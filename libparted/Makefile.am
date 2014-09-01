@@ -1,6 +1,5 @@
 # This file is part of GNU Parted
-# Copyright (C) 1999-2001, 2007, 2009-2010 Free Software Foundation,
-# Inc.
+# Copyright (C) 1999-2001, 2007, 2009-2014 Free Software Foundation, Inc.
 #
 # This file may be modified and/or distributed without restriction.
 
@@ -10,21 +9,20 @@ SUBDIRS_CHECK += tests
 endif
 
 ARCH_SOURCE = arch/$(OS).c
-if BUILD_LINUX
-ARCH_SOURCE += arch/$(OS).h
-endif
 
 AM_CFLAGS = $(WARN_CFLAGS) $(WERROR_CFLAGS)
 
 SUBDIRS       = labels fs . $(SUBDIRS_CHECK)
 
 
-partedincludedir      = -I$(top_srcdir)/lib -I$(top_srcdir)/include
-lib_LTLIBRARIES	      =	libparted.la
+partedincludedir = \
+  -I$(top_srcdir)/lib -I$(top_builddir)/include -I$(top_srcdir)/include
+lib_LTLIBRARIES	= libparted.la
 
 # Set the shared library version, per Libtool's guidelines.
-# For details, see the "Libtool's versioning system" section of "info libtool"
-CURRENT = 0
+# For details, see the "Updating library version information" section of
+# "info libtool".
+CURRENT = 2
 REVISION = 1
 AGE = 0
 
@@ -64,6 +62,4 @@ libparted_la_LIBADD =	\
 
 EXTRA_DIST	      = mbr.s
 
-INCLUDES = $(partedincludedir) $(INTLINCS)
-
-MAINTAINERCLEANFILES = Makefile.in
+AM_CPPFLAGS = $(partedincludedir) $(INTLINCS)

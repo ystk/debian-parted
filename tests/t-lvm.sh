@@ -1,7 +1,7 @@
 # Put lvm-related utilities here.
-# This file is sourced from test-lib.sh.
+# This file is sourced from test infrastructure.
 
-# Copyright (C) 2007, 2008 Red Hat, Inc. All rights reserved.
+# Copyright (C) 2007-2012 Red Hat, Inc. All rights reserved.
 #
 # This copyrighted material is made available to anyone wishing to use,
 # modify, copy, or redistribute it subject to the terms and conditions
@@ -13,38 +13,15 @@
 
 export LVM_SUPPRESS_FD_WARNINGS=1
 
-ME=$(basename "$0")
-warn() { echo >&2 "$ME: $@"; }
-
-unsafe_losetup_()
-{
-  f=$1
-
-  test -n "$G_dev_" \
-    || error "Internal error: unsafe_losetup_ called before init_root_dir_"
-
-  # Iterate through $G_dev_/loop{,/}{0,1,2,3,4,5,6,7,8,9}
-  for slash in '' /; do
-    for i in 0 1 2 3 4 5 6 7 8 9; do
-      dev=$G_dev_/loop$slash$i
-      losetup $dev > /dev/null 2>&1 && continue;
-      losetup "$dev" "$f" > /dev/null && { echo "$dev"; return 0; }
-      break
-    done
-  done
-
-  return 1
-}
-
 loop_setup_()
 {
   file=$1
-  dd if=/dev/zero of="$file" bs=1M count=1 seek=1000 > /dev/null 2>&1 \
-    || { warn "loop_setup_ failed: Unable to create tmp file $file"; return 1; }
+  dd if=/dev/null of="$file" bs=1M count=1 seek=1000 > /dev/null 2>&1 \
+    || { warn_ "loop_setup_ failed: Unable to create tmp file $file"; return 1; }
 
   # NOTE: this requires a new enough version of losetup
-  dev=$(unsafe_losetup_ "$file" 2>/dev/null) \
-    || { warn "loop_setup_ failed: Unable to create loopback device"; return 1; }
+  dev=$(losetup --show -f "$file") \
+    || { warn_ "loop_setup_ failed: Unable to create loopback device"; return 1; }
 
   echo "$dev"
   return 0;
@@ -53,13 +30,12 @@ loop_setup_()
 # set up private /dev and /etc
 lvm_init_root_dir_()
 {
-  test -n "$t_" \
-    || skip_test_ "Internal error: called lvm_init_root_dir_ before" \
-      "defining \$t_"
-  test_dir_rand_=$t_
+  test -z "$test_dir_" \
+    && skip_ "Internal error: called lvm_init_root_dir_ before" \
+      "defining \$test_dir_"
 
   # Define these two globals.
-  G_root_=$test_dir_rand_/root
+  G_root_=$test_dir_/root
   G_dev_=$G_root_/dev
 
   export LVM_SYSTEM_DIR=$G_root_/etc

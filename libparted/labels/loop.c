@@ -1,6 +1,6 @@
 /*
     libparted - a library for manipulating disk partitions
-    Copyright (C) 1999-2000, 2007-2010 Free Software Foundation, Inc.
+    Copyright (C) 1999-2000, 2007-2014 Free Software Foundation, Inc.
 
     This program is free software; you can redistribute it and/or modify
     it under the terms of the GNU General Public License as published by
@@ -76,11 +76,27 @@ error:
 static PedDisk*
 loop_alloc (const PedDevice* dev)
 {
-	PED_ASSERT (dev != NULL, return 0);
+	PED_ASSERT (dev != NULL);
 
 	if (dev->length < 256)
 		return NULL;
-	return _ped_disk_alloc ((PedDevice*)dev, &loop_disk_type);
+	PedDisk *disk = _ped_disk_alloc ((PedDevice*)dev, &loop_disk_type);
+	PED_ASSERT (disk != NULL);
+	PedGeometry *geom = ped_geometry_new (dev, 0, dev->length);
+	PED_ASSERT (geom != NULL);
+	PedPartition *part = ped_partition_new (disk, PED_PARTITION_NORMAL,
+						NULL, geom->start, geom->end);
+	PED_ASSERT (part != NULL);
+	ped_geometry_destroy (geom);
+	PedConstraint *constraint_any = ped_constraint_any (dev);
+	if (!ped_disk_add_partition (disk, part, constraint_any))
+		goto error;
+	ped_constraint_destroy (constraint_any);
+	return disk;
+ error:
+	ped_constraint_destroy (constraint_any);
+	ped_disk_destroy (disk);
+	return NULL;
 }
 
 static PedDisk*
@@ -92,7 +108,7 @@ loop_duplicate (const PedDisk* disk)
 static void
 loop_free (PedDisk* disk)
 {
-	PED_ASSERT (disk != NULL, return);
+	PED_ASSERT (disk != NULL);
 
 	_ped_disk_free (disk);
 }
@@ -106,7 +122,7 @@ loop_read (PedDisk* disk)
 	PedPartition*		part;
 	PedConstraint*		constraint_any;
 
-	PED_ASSERT (disk != NULL, return 0);
+	PED_ASSERT (disk != NULL);
 	dev = disk->dev;
 	constraint_any = ped_constraint_any (dev);
 
@@ -118,18 +134,12 @@ loop_read (PedDisk* disk)
 
         int found_sig = !strncmp (buf, LOOP_SIGNATURE, strlen (LOOP_SIGNATURE));
         free (buf);
-
-        if (found_sig) {
-		ped_constraint_destroy (constraint_any);
-		return 1;
-        }
-
 	geom = ped_geometry_new (dev, 0, dev->length);
 	if (!geom)
 		goto error;
 
 	fs_type = ped_file_system_probe (geom);
-	if (!fs_type)
+	if (!fs_type && !found_sig)
 		goto error_free_geom;
 
 	part = ped_partition_new (disk, PED_PARTITION_NORMAL,
@@ -137,7 +147,6 @@ loop_read (PedDisk* disk)
 	ped_geometry_destroy (geom);
 	if (!part)
 		goto error;
-	part->fs_type = fs_type;
 
 	if (!ped_disk_add_partition (disk, part, constraint_any))
 		goto error;
@@ -156,29 +165,16 @@ static int
 loop_write (const PedDisk* disk)
 {
 	size_t buflen = disk->dev->sector_size;
-	char *buf = ped_malloc (buflen);
-	if (buf == NULL)
+	char *buf = alloca (buflen);
+	PedPartition *part = ped_disk_get_partition (disk, 1);
+	/* if there is already a filesystem on the disk, we don't need to write the signature */
+	if (part && part->fs_type)
+		return 1;
+	if (!ped_device_read (disk->dev, buf, 0, 1))
 		return 0;
-
-	if (ped_disk_get_partition (disk, 1)) {
-		if (!ped_device_read (disk->dev, buf, 0, 1)) {
-			free (buf);
-			return 0;
-		}
-		if (strncmp (buf, LOOP_SIGNATURE, strlen (LOOP_SIGNATURE)) != 0) {
-			free (buf);
-			return 1;
-                }
-		memset (buf, 0, strlen (LOOP_SIGNATURE));
-		return ped_device_write (disk->dev, buf, 0, 1);
-	}
-
-	memset (buf, 0, buflen);
 	strcpy (buf, LOOP_SIGNATURE);
 
-        int write_ok = ped_device_write (disk->dev, buf, 0, 1);
-        free (buf);
-	return write_ok;
+        return ped_device_write (disk->dev, buf, 0, 1);
 }
 #endif /* !DISCOVER_ONLY */
 
@@ -203,6 +199,8 @@ loop_partition_duplicate (const PedPartition* part)
 
 	result = ped_partition_new (part->disk, part->type, part->fs_type,
 				    part->geom.start, part->geom.end);
+	if (result == NULL)
+		return NULL;
 	result->num = part->num;
 	return result;
 }
