@@ -1,4 +1,4 @@
-From bfbc311a960a094aacc06995caf9739e6034271a Mon Sep 17 00:00:00 2001
+From f37708da67219339ca6979e2c8736c5a4bf4bf74 Mon Sep 17 00:00:00 2001
 From: Aurelien Jarno <aurelien@aurel32.net>
 Date: Fri, 28 Mar 2014 17:09:46 +0000
 Subject: Add FreeBSD UFS support

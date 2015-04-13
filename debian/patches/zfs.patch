@@ -1,4 +1,4 @@
-From a0c68b24fc77b51c6db92e6591169121a0519504 Mon Sep 17 00:00:00 2001
+From 8d5016bf8866a94438f4822d67e32a78422b4287 Mon Sep 17 00:00:00 2001
 From: Colin Watson <cjwatson@ubuntu.com>
 Date: Fri, 28 Mar 2014 17:09:48 +0000
 Subject: Add ZFS support

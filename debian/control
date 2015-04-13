@@ -68,7 +68,7 @@ Architecture: any
 Section: libs
 Pre-Depends: ${misc:Pre-Depends}
 Depends: ${shlibs:Depends}, ${misc:Depends}
-Suggests: parted | nparted, libparted-dev, libparted-i18n (= ${source:Version})
+Suggests: parted, libparted-dev, libparted-i18n (= ${source:Version})
 Conflicts: parted (<< 1.4.13+14pre1), libparted1 (<< 2.2)
 Replaces: libparted0 (<< 2.2-4), libparted1 (<< 2.2), libparted1.4 (<< 1.4.24-2)
 Provides: libparted

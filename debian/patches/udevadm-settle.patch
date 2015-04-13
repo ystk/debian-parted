@@ -1,4 +1,4 @@
-From 1ff9793ae6d7e2299236cd1c0503cbe66ca38567 Mon Sep 17 00:00:00 2001
+From 0dd58cc5ac1cd5419bc1a6b45bf3acf4e13308de Mon Sep 17 00:00:00 2001
 From: Colin Watson <cjwatson@ubuntu.com>
 Date: Fri, 28 Mar 2014 17:10:16 +0000
 Subject: udev handling

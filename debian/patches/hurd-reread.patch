@@ -1,4 +1,4 @@
-From cf52f4844ea272e55de976e7ea3b66b6c0e5336d Mon Sep 17 00:00:00 2001
+From 6ea0e57f5adb906b27af877c2533bb41c64dc3db Mon Sep 17 00:00:00 2001
 From: Colin Watson <cjwatson@ubuntu.com>
 Date: Fri, 28 Mar 2014 17:09:54 +0000
 Subject: Implement partition table rereading on GNU/Hurd

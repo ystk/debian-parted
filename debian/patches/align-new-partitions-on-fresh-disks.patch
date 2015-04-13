@@ -1,4 +1,4 @@
-From 9a91b89d2c20bda1947be35dc3d7b739fdcf6c8a Mon Sep 17 00:00:00 2001
+From 18a51e33dce2fb187b95b70b4d0856828cfd0b48 Mon Sep 17 00:00:00 2001
 From: Colin Watson <cjwatson@ubuntu.com>
 Date: Wed, 6 Aug 2014 16:07:28 +0200
 Subject: Align new partitions created on fresh disks

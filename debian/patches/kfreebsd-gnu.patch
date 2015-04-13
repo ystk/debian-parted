@@ -1,24 +1,26 @@
-From e907ef5ece2c020bf9eda7efd9b97a055ce8595d Mon Sep 17 00:00:00 2001
+From 116bf42f262f0516b5d659805ac4bbfee36d0b0c Mon Sep 17 00:00:00 2001
 From: Viktor Vasilev <Viktor Vasilev>
 Date: Fri, 28 Mar 2014 17:09:42 +0000
 Subject: Add GNU/kFreeBSD support
 
 Author: Robert Millan <rmh@aybabtu.com>
 Author: Colin Watson <cjwatson@debian.org>
+Author: Jeff Epler <jepler@unpythonic.net>
 Bug-Debian: http://bugs.debian.org/363381
+Bug-Debian: http://bugs.debian.org/693510
 Forwarded: no
-Last-Update: 2014-07-07
+Last-Update: 2014-09-19
 
 Patch-Name: kfreebsd-gnu.patch
 ---
  configure.ac                     |    8 +-
  libparted/Makefile.am            |    3 +-
- libparted/arch/freebsd.c         | 1254 ++++++++++++++++++++++++++++++++++++++
+ libparted/arch/freebsd.c         | 1292 ++++++++++++++++++++++++++++++++++++++
  libparted/architecture.c         |    3 +
  libparted/fs/xfs/platform_defs.h |    6 +-
  libparted/labels/bsd.c           |    1 +
  libparted/labels/sun.c           |    1 +
- 7 files changed, 1272 insertions(+), 4 deletions(-)
+ 7 files changed, 1310 insertions(+), 4 deletions(-)
  create mode 100644 libparted/arch/freebsd.c
 
 diff --git a/configure.ac b/configure.ac
@@ -77,10 +79,10 @@ index edc5f2e..b410e64 100644
    fs/libfs.la		\
 diff --git a/libparted/arch/freebsd.c b/libparted/arch/freebsd.c
 new file mode 100644
-index 0000000..52f5293
+index 0000000..4c690e5
 --- /dev/null
 +++ b/libparted/arch/freebsd.c
-@@ -0,0 +1,1254 @@
+@@ -0,0 +1,1292 @@
 +/*
 +    libparted - a library for manipulating disk partitions
 +    Copyright (C) 1999 - 2009 Free Software Foundation, Inc.
@@ -142,6 +144,7 @@ index 0000000..52f5293
 +
 +struct _FreeBSDSpecific {
 +	int	fd;
++	long long	phys_sector_size;
 +};
 +
 +static char* _device_get_part_path (PedDevice* dev, int num);
@@ -190,7 +193,9 @@ index 0000000..52f5293
 +	}
 +	np += 1; /* advance past '/' */
 +
-+	if(strncmp(np, "ad", 2) == 0) {
++	if (strncmp(np, "ada", 3) == 0) {
++		dev->type = PED_DEVICE_SCSI;
++	} else if (strncmp(np, "ad", 2) == 0) {
 +		dev->type = PED_DEVICE_IDE;
 +	} else if (strncmp(np, "da", 2) == 0) {
 +		dev->type = PED_DEVICE_SCSI;
@@ -227,6 +232,9 @@ index 0000000..52f5293
 +	} else {
 +		dev->sector_size = (long long)sector_size;;
 +	}
++
++	if (arch_specific->phys_sector_size)
++		dev->phys_sector_size = arch_specific->phys_sector_size;
 +
 +	if (sector_size != PED_SECTOR_SIZE_DEFAULT) {
 +		ped_exception_throw (
@@ -370,7 +378,8 @@ index 0000000..52f5293
 +	int		fd;
 +	char		result[64];
 +
-+	if (sscanf (dev->path, "/dev/%2s%u", ccb.cgdl.periph_name, &ccb.cgdl.unit_number) != 2)
++	if (sscanf (dev->path, "/dev/%2s%u", ccb.cgdl.periph_name, &ccb.cgdl.unit_number) != 2 &&
++		sscanf (dev->path, "/dev/%3s%u", ccb.cgdl.periph_name, &ccb.cgdl.unit_number) != 2)
 +		goto error;
 +
 +	if ((fd = open("/dev/xpt0", O_RDWR)) < 0)
@@ -390,9 +399,32 @@ index 0000000..52f5293
 +	return NULL;
 +}
 +
++static uint32_t
++local_ata_logical_sector_size(struct ata_params *ident_data)
++{
++        if ((ident_data->pss & 0xc000) == 0x4000 &&
++            (ident_data->pss & ATA_PSS_LSSABOVE512)) {
++                return ((u_int32_t)ident_data->lss_1 |
++                    ((u_int32_t)ident_data->lss_2 << 16));
++        }
++        return (512);
++}
++
++static uint64_t
++local_ata_physical_sector_size(struct ata_params *ident_data)
++{
++        if ((ident_data->pss & 0xc000) == 0x4000 &&
++            (ident_data->pss & ATA_PSS_MULTLS)) {
++                return ((uint64_t)local_ata_logical_sector_size(ident_data) *
++                    (1 << (ident_data->pss & ATA_PSS_LSPPS)));
++        }
++        return (512);
++}
++
 +static int
 +init_scsi (PedDevice* dev)
 +{
++	FreeBSDSpecific*	arch_specific = FREEBSD_SPECIFIC (dev);
 +	PedExceptionOption 	ex_status;
 +	struct stat		dev_stat;
 +	char*			pass_dev;
@@ -473,10 +505,16 @@ index 0000000..52f5293
 +				break;
 +		}
 +	} else {
-+		dev->model = (char*) ped_malloc (8 + 16 + 2);
++		size_t model_length = (8 + 16 + 2);
++		dev->model = (char*) ped_malloc (model_length);
 +		if (!dev->model)
 +			goto error_close_fd_dev;
-+		sprintf (dev->model, "%.8s %.16s", ccb.cgd.inq_data.vendor, ccb.cgd.inq_data.product);
++		if (ccb.cgd.protocol == PROTO_ATA && *ccb.cgd.ident_data.model) {
++			snprintf (dev->model, model_length, "%s", ccb.cgd.ident_data.model);
++			arch_specific->phys_sector_size = local_ata_physical_sector_size(&ccb.cgd.ident_data);
++		} else {
++			snprintf (dev->model, model_length, "%.8s %.16s", ccb.cgd.inq_data.vendor, ccb.cgd.inq_data.product);
++		}
 +	}
 +
 +	if (!_device_probe_geometry (dev))
@@ -615,6 +653,8 @@ index 0000000..52f5293
 +		= (FreeBSDSpecific*) ped_malloc (sizeof (FreeBSDSpecific));
 +	if (!dev->arch_specific)
 +		goto error_free_path;
++
++	memset(dev->arch_specific, 0, sizeof(FreeBSDSpecific));
 +
 +	dev->open_count = 0;
 +	dev->read_only = 0;
